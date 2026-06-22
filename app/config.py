@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     max_lookback_hours: int = 48
     raw_ttl_days: int = 30
     default_project: str = "Inbox"
+    # TickTick id for the fallback project of unbound chats. The built-in Inbox
+    # (id like "inbox<uid>") is NOT returned by get_projects, so it can only be
+    # targeted by id. Takes priority over default_project (name) when set.
+    default_project_id: str = ""
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app

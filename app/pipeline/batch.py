@@ -84,7 +84,12 @@ async def _resolve_project(chat_id: str) -> tuple[str | None, str]:
     if binding:
         return binding["ticktickProjectId"], binding.get("projectName", "")
 
-    default_name = get_settings().default_project
+    s = get_settings()
+    default_name = s.default_project
+    # Prefer an explicit id (e.g. the built-in Inbox, which get_projects omits).
+    if s.default_project_id:
+        return s.default_project_id, default_name or "Inbox"
+    # Otherwise resolve the configured default project name to a real id.
     if default_name:
         try:
             for p in await get_ticktick().get_projects():
