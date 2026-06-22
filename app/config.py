@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Uses the same bearer token as Qwen (qwen_api_key).
     transcribe_url: str = ""
 
+    # Retrieval memory (local embeddings on the mini via Ollama, vectors in
+    # Mongo). Embeds processed messages into a permanent archive and injects the
+    # most relevant past ones into Claude — deep recall without widening the
+    # window. Empty embed_model → retrieval disabled. Shares qwen_base_url/key.
+    embed_model: str = "bge-m3"
+    retrieve_top_k: int = 6
+    retrieve_min_score: float = 0.45
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600

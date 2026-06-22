@@ -35,7 +35,11 @@ SYSTEM_PROMPT = (
     "direction, sender, time and message id.\n"
     "  2. LONG-TERM MEMORY — a prior summary of the chat and the list of currently "
     "OPEN tasks (these may pre-date the window; the raw messages behind them may be "
-    "gone). Use it for context so a topic revisited weeks later is understood.\n\n"
+    "gone). Use it for context so a topic revisited weeks later is understood.\n"
+    "  3. (sometimes) RETRIEVED PAST CONTEXT — individual OLDER messages from this "
+    "chat, surfaced by semantic similarity to the window. Treat them as real prior "
+    "evidence to resolve references and continuity; they may sit outside the window "
+    "and the summary.\n\n"
     "Do INCREMENTAL work:\n"
     "  - new_tasks: only tasks NOT already in the open-task list. For each: who is "
     "responsible (\"me\" = owner, \"counterparty\"), the counterparty's name if known, "
@@ -114,7 +118,12 @@ def _get_client() -> AsyncAnthropic:
     return _client
 
 
-def _build_user_prompt(window_text: str, summary: str, open_tasks: list[dict[str, Any]]) -> str:
+def _build_user_prompt(
+    window_text: str,
+    summary: str,
+    open_tasks: list[dict[str, Any]],
+    retrieved: list[str] | None = None,
+) -> str:
     open_lines = (
         "\n".join(
             f"- [{t.get('who', '?')}] {t['task']}"
@@ -123,6 +132,15 @@ def _build_user_prompt(window_text: str, summary: str, open_tasks: list[dict[str
         )
         or "(none)"
     )
+    retrieved_block = ""
+    if retrieved:
+        joined = "\n".join(f"- {r}" for r in retrieved)
+        retrieved_block = (
+            "\n# RETRIEVED PAST CONTEXT\n"
+            "Older messages from this chat, semantically related to the window "
+            "(may pre-date it):\n"
+            f"{joined}\n"
+        )
     return (
         "# CONVERSATION WINDOW\n"
         f"{window_text}\n\n"
@@ -131,10 +149,16 @@ def _build_user_prompt(window_text: str, summary: str, open_tasks: list[dict[str
         f"{summary or '(none yet)'}\n\n"
         "## Currently open tasks for this chat\n"
         f"{open_lines}\n"
+        f"{retrieved_block}"
     )
 
 
-async def extract(window_text: str, summary: str, open_tasks: list[dict[str, Any]]) -> dict[str, Any]:
+async def extract(
+    window_text: str,
+    summary: str,
+    open_tasks: list[dict[str, Any]],
+    retrieved: list[str] | None = None,
+) -> dict[str, Any]:
     s = get_settings()
     resp = await _get_client().messages.create(
         model=s.anthropic_model,
@@ -145,7 +169,9 @@ async def extract(window_text: str, summary: str, open_tasks: list[dict[str, Any
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
         system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": _build_user_prompt(window_text, summary, open_tasks)}],
+        messages=[
+            {"role": "user", "content": _build_user_prompt(window_text, summary, open_tasks, retrieved)}
+        ],
     )
     # With structured output the model emits a JSON text block (after any thinking
     # blocks). Grab the first text block.

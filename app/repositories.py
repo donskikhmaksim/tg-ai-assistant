@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 
 from .db import get_db
 
@@ -213,6 +213,50 @@ async def delete_project_binding(chat_id: str) -> bool:
 async def list_project_bindings() -> list[dict[str, Any]]:
     db = get_db()
     return [d async for d in get_db().chat_project_map.find({})]
+
+
+# ---------------------------------------------------------------------------
+# message_vectors (permanent embedding archive for retrieval)
+# ---------------------------------------------------------------------------
+
+async def existing_vector_ids(chat_id: str, message_ids: list[int]) -> set[int]:
+    db = get_db()
+    cursor = db.message_vectors.find(
+        {"chatId": chat_id, "messageId": {"$in": message_ids}}, {"messageId": 1}
+    )
+    return {d["messageId"] async for d in cursor}
+
+
+async def store_vectors(chat_id: str, items: list[dict[str, Any]]) -> None:
+    """Upsert embedding rows. Each item: messageId, text, date, embedding."""
+    if not items:
+        return
+    db = get_db()
+    ops = [
+        UpdateOne(
+            {"chatId": chat_id, "messageId": it["messageId"]},
+            {"$setOnInsert": {**it, "chatId": chat_id}},
+            upsert=True,
+        )
+        for it in items
+    ]
+    await db.message_vectors.bulk_write(ops, ordered=False)
+
+
+async def get_chat_vectors(
+    chat_id: str, exclude_ids: set[int], limit: int = 5000
+) -> list[dict[str, Any]]:
+    """Most recent stored vectors for a chat, excluding given message ids."""
+    db = get_db()
+    cursor = (
+        db.message_vectors.find(
+            {"chatId": chat_id, "messageId": {"$nin": list(exclude_ids)}},
+            {"messageId": 1, "text": 1, "embedding": 1},
+        )
+        .sort("date", -1)
+        .limit(limit)
+    )
+    return [d async for d in cursor]
 
 
 # ---------------------------------------------------------------------------

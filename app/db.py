@@ -67,3 +67,7 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase, raw_ttl_seconds: int) -> Non
     await db.chat_state.create_index([("chatId", ASCENDING)], unique=True)
     await db.chat_summary.create_index([("chatId", ASCENDING)], unique=True)
     await db.bot_state.create_index([("key", ASCENDING)], unique=True)
+    # Permanent embedding archive for retrieval (NO TTL — survives raw expiry).
+    await db.message_vectors.create_index(
+        [("chatId", ASCENDING), ("messageId", ASCENDING)], unique=True
+    )

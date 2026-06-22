@@ -18,6 +18,7 @@ from .. import repositories as repo
 from ..config import get_settings
 from ..llm import claude, qwen
 from ..ticktick.mcp_client import get_ticktick
+from . import retrieve as retrieval
 from .dedup import to_ticktick_due
 from .windows import build_window, render_window
 
@@ -50,16 +51,23 @@ async def process_chat(chat_id: str) -> None:
 
     window_text = render_window(window)
 
+    # Archive embeddings for retrieval (dedup'd; permanent, survives raw TTL).
+    await retrieval.index_messages(chat_id, messages)
+
     # Tier 1 — cheap local gate.
     if not await qwen.has_task(window_text):
         logger.info("Chat %s: Qwen says no task", chat_id)
         await repo.mark_processed(chat_id)
         return
 
-    # Tier 2 — Claude with long-term memory.
+    # Deep recall: relevant OLDER messages beyond the window + summary.
+    window_ids = {m["messageId"] for m in window}
+    retrieved = await retrieval.retrieve(chat_id, window_text, window_ids)
+
+    # Tier 2 — Claude with long-term memory + retrieved context.
     summary = await repo.get_summary(chat_id)
     open_tasks = await repo.get_open_tasks(chat_id)
-    result = await claude.extract(window_text, summary, open_tasks)
+    result = await claude.extract(window_text, summary, open_tasks, retrieved)
 
     # Memory first: persist the refreshed summary before raw expires.
     new_summary = result.get("updated_summary")
