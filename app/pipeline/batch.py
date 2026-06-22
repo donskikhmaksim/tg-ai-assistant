@@ -72,11 +72,27 @@ async def process_chat(chat_id: str) -> None:
 
 
 async def _resolve_project(chat_id: str) -> tuple[str | None, str]:
-    """Returns (projectId, projectName). Falls back to Inbox (no explicit id)."""
+    """Returns (projectId, projectName) for a chat's tasks.
+
+    Explicit binding wins. Otherwise tasks fall back to the configured default
+    project (DEFAULT_PROJECT), resolved by name to a real TickTick id so they
+    actually land in an inbox instead of only being stored locally. If the
+    default name matches no project, we return (None, name) and the task stays
+    local until the chat is bound.
+    """
     binding = await repo.get_project_binding(chat_id)
     if binding:
         return binding["ticktickProjectId"], binding.get("projectName", "")
-    return None, get_settings().default_project
+
+    default_name = get_settings().default_project
+    if default_name:
+        try:
+            for p in await get_ticktick().get_projects():
+                if p["name"] == default_name:
+                    return p["id"], p["name"]
+        except Exception:  # noqa: BLE001
+            logger.exception("Default project lookup failed for %r", default_name)
+    return None, default_name
 
 
 async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> None:
