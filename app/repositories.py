@@ -57,6 +57,13 @@ async def list_known_chats() -> list[dict[str, Any]]:
     return [d async for d in cursor]
 
 
+async def get_chat_title(chat_id: str) -> str:
+    """Human-readable chat name (group title / DM counterparty), else the id."""
+    db = get_db()
+    doc = await db.chat_state.find_one({"chatId": chat_id}, {"title": 1})
+    return (doc or {}).get("title") or chat_id
+
+
 async def get_dirty_chats() -> list[str]:
     """Chats with new messages since the last processed run.
 

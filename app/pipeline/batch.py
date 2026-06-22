@@ -104,6 +104,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
     if not new_tasks:
         return
     project_id, project_name = await _resolve_project(chat_id)
+    source_title = await repo.get_chat_title(chat_id)
     tt = get_ticktick()
 
     for t in new_tasks:
@@ -137,7 +138,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.info("Chat %s: task stored locally (no project bound): %s", chat_id, title)
             continue
         try:
-            note = _task_note(t)
+            note = _task_note(t, source_title)
             tt_id = await tt.create_task(
                 title=title,
                 project_id=project_id,
@@ -151,8 +152,10 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.exception("Chat %s: TickTick create_task failed for '%s'", chat_id, title)
 
 
-def _task_note(t: dict[str, Any]) -> str:
+def _task_note(t: dict[str, Any], source_title: str | None = None) -> str:
     bits = []
+    if source_title:
+        bits.append(f"Источник: {source_title}")
     who = t.get("who")
     if who == "counterparty":
         name = t.get("counterpartyName")
