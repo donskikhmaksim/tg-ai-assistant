@@ -73,7 +73,22 @@ async def api_data(request: web.Request) -> web.Response:
         }
         for c in chats
     ]
-    return web.json_response({"projects": projects, "chats": out_chats})
+    return web.json_response(
+        {"projects": projects, "chats": out_chats, "botUsername": await _bot_username(request)}
+    )
+
+
+async def _bot_username(request: web.Request) -> str:
+    """Cached bot username, for the WebApp's "add to group" deep link."""
+    cached = request.app.get("bot_username")
+    if cached:
+        return cached
+    try:
+        me = await request.app["bot"].get_me()
+        request.app["bot_username"] = me.username or ""
+        return request.app["bot_username"]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 async def api_bind(request: web.Request) -> web.Response:

@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram import Bot, F, Router
+from aiogram.filters import ChatMemberUpdatedFilter, Command, CommandStart, JOIN_TRANSITION
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -49,6 +50,17 @@ def _main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
+def _open_app_markup() -> InlineKeyboardMarkup | None:
+    url = get_settings().webapp_url
+    if not url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Привязать к проекту", web_app=WebAppInfo(url=url.rstrip("/") + "/app"))]
+        ]
+    )
+
+
 @router.message(Command("app"))
 async def cmd_app(message: Message) -> None:
     url = get_settings().webapp_url
@@ -56,6 +68,33 @@ async def cmd_app(message: Message) -> None:
         await message.answer("Мини-апка ещё не настроена (нет WEBAPP_URL).")
         return
     await message.answer("Открыть управление привязками:", reply_markup=_main_menu())
+
+
+@router.my_chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
+async def on_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
+    """Bot was just added to a group — register it and nudge the owner to bind.
+
+    Capture already starts automatically (no command needed); this only makes
+    binding to a project a one-tap follow-up.
+    """
+    chat = event.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    chat_id = f"group_{chat.id}"
+    await repo.touch_chat_state(chat_id, repo.utcnow(), chat.title)
+
+    owner_id = await repo.get_bot_state("owner_id")
+    if not owner_id:
+        return  # owner unknown until the bot is connected to Telegram Business
+    try:
+        await bot.send_message(
+            int(owner_id),
+            f"➕ Меня добавили в «{chat.title or chat_id}». Я уже слушаю эту группу — "
+            "осталось привязать её к проекту TickTick.",
+            reply_markup=_open_app_markup(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to notify owner about new group %s", chat_id)
 
 
 def _chat_id_for(message: Message) -> str:

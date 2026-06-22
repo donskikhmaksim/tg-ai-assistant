@@ -35,6 +35,11 @@
       background: var(--bg); color: var(--text); font-size: 15px; appearance: none;
     }
     .saved { color: var(--accent); font-size: 12px; min-height: 14px; }
+    #addBtn {
+      display: none; width: 100%; margin: 6px 0 4px; padding: 12px;
+      border: none; border-radius: 11px; background: var(--accent); color: var(--accent-text);
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
     .empty, .err { text-align: center; color: var(--hint); margin-top: 40px; }
     .err { color: #e05a5a; }
     #toast {
@@ -49,6 +54,7 @@
 <body>
   <h1>Чаты → проекты TickTick</h1>
   <div class="sub">Выбери проект для каждого чата. Задачи из чата будут попадать в него.</div>
+  <button id="addBtn">➕ Добавить бота в группу</button>
   <div id="content"><div class="empty">Загрузка…</div></div>
   <div id="toast"></div>
 
@@ -146,9 +152,23 @@
       }
     }
 
+    function wireAddButton(botUsername) {
+      const btn = document.getElementById("addBtn");
+      if (!botUsername) return;
+      btn.style.display = "block";
+      btn.addEventListener("click", () => {
+        // Telegram's native "add to group" chooser — shows the user's groups
+        // and adds the bot to the picked one (bots can't self-join or list groups).
+        const link = `https://t.me/${botUsername}?startgroup=true`;
+        if (tg?.openTelegramLink) tg.openTelegramLink(link);
+        else window.open(link, "_blank");
+      });
+    }
+
     (async () => {
       try {
         const data = await api("/api/data");
+        wireAddButton(data.botUsername);
         render(data);
       } catch (e) {
         $content.innerHTML = `<div class="err">Не удалось загрузить.<br>${esc(e.message)}</div>`;
