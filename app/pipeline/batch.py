@@ -169,12 +169,10 @@ def _task_note(t: dict[str, Any], source_title: str | None = None) -> str:
     details = (t.get("details") or "").strip()
     if details:
         bits.append(details)
-    who = t.get("who")
-    if who == "counterparty":
+    # Only note responsibility when it's someone ELSE — own tasks need no label.
+    if t.get("who") == "counterparty":
         name = t.get("counterpartyName")
-        bits.append(f"Responsible: {name}" if name else "Responsible: counterparty")
-    elif who == "me":
-        bits.append("Responsible: me")
+        bits.append(f"Ответственный: {name}" if name else "Ответственный: собеседник")
     return "\n".join(bits)
 
 
