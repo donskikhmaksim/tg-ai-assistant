@@ -17,12 +17,16 @@ from ..config import get_settings
 logger = logging.getLogger(__name__)
 
 _SYSTEM = (
-    "You are a triage filter. You read a fragment of a chat conversation "
-    "(Russian or English) and decide whether it contains at least one actionable "
-    "item: a task, a to-do, a promise, a commitment, an agreement, a request, or "
-    "a deadline — for either participant. Casual chatter, greetings, reactions and "
-    "small talk are NOT tasks. Respond with strict JSON only: {\"has_task\": true} "
-    "or {\"has_task\": false}. No prose."
+    "You are a HIGH-RECALL triage filter before an expensive extractor. You read "
+    "a fragment of a chat conversation (Russian or English) and decide whether it "
+    "MIGHT contain any actionable item — a task, to-do, promise, commitment, "
+    "agreement, request, reminder, plan, or deadline — for either participant. "
+    "Informal, hedged or vague phrasing (\"наверное надо\", \"нужно бы\", \"не забыть\", "
+    "\"что ли\", \"как-нибудь\") STILL counts. Only answer false for content that is "
+    "CLEARLY just greetings, reactions, emotions or small talk with no actionable "
+    "hint at all. WHEN IN DOUBT, answer true — a stronger model does the real "
+    "filtering. Respond with strict JSON only: {\"has_task\": true} or "
+    "{\"has_task\": false}. No prose."
 )
 
 _client: AsyncOpenAI | None = None
