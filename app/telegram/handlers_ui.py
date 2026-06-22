@@ -20,9 +20,11 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 from .. import repositories as repo
+from ..config import get_settings
 from ..ticktick.mcp_client import get_ticktick
 
 logger = logging.getLogger(__name__)
@@ -32,16 +34,28 @@ router = Router(name="ui")
 BTN_BIND = "🔗 Привязать проект"
 BTN_LIST = "📋 Мои привязки"
 BTN_UNBIND = "❌ Отвязать"
+BTN_APP = "🗂 Открыть мини-апку"
 
 # Transient per-user bind session: user_id -> {"chatId": str, "projects": {id: name}}
 _bind_sessions: dict[int, dict] = {}
 
 
 def _main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_BIND)], [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_UNBIND)]],
-        resize_keyboard=True,
-    )
+    rows = [[KeyboardButton(text=BTN_BIND)], [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_UNBIND)]]
+    # The Mini App (Phase 2) — a one-tap WebApp for managing all bindings at once.
+    url = get_settings().webapp_url
+    if url:
+        rows.insert(0, [KeyboardButton(text=BTN_APP, web_app=WebAppInfo(url=url.rstrip("/") + "/app"))])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message) -> None:
+    url = get_settings().webapp_url
+    if not url:
+        await message.answer("Мини-апка ещё не настроена (нет WEBAPP_URL).")
+        return
+    await message.answer("Открыть управление привязками:", reply_markup=_main_menu())
 
 
 def _chat_id_for(message: Message) -> str:

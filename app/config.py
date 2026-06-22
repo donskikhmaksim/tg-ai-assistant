@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     raw_ttl_days: int = 30
     default_project: str = "Inbox"
 
+    # Web / Mini App (Phase 2)
+    # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
+    # Railway injects PORT; the aiohttp server binds it. WEBAPP_URL drives the
+    # Telegram menu button and is the origin the WebApp calls back to.
+    webapp_url: str = ""
+    port: int = 8080
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600

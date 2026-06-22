@@ -23,12 +23,13 @@ def utcnow() -> datetime:
 # raw_messages + chat_state
 # ---------------------------------------------------------------------------
 
-async def save_raw_message(doc: dict[str, Any]) -> None:
+async def save_raw_message(doc: dict[str, Any], title: str | None = None) -> None:
     """Persist a single update atomically, then bump the chat cursor.
 
     Loss is irreversible (Telegram never resends), so this runs before any
     processing. We de-dupe on (chatId, messageId) so re-delivered updates and
-    manual reruns don't double-insert.
+    manual reruns don't double-insert. `title` is the human-readable chat name
+    (group title or DM counterparty), stored on chat_state for the Mini App.
     """
     db = get_db()
     await db.raw_messages.update_one(
@@ -36,16 +37,24 @@ async def save_raw_message(doc: dict[str, Any]) -> None:
         {"$set": doc},
         upsert=True,
     )
-    await touch_chat_state(doc["chatId"], doc["date"])
+    await touch_chat_state(doc["chatId"], doc["date"], title)
 
 
-async def touch_chat_state(chat_id: str, when: datetime) -> None:
+async def touch_chat_state(chat_id: str, when: datetime, title: str | None = None) -> None:
     db = get_db()
-    await db.chat_state.update_one(
-        {"chatId": chat_id},
-        {"$max": {"lastMessageAt": when}, "$setOnInsert": {"chatId": chat_id}},
-        upsert=True,
+    update: dict[str, Any] = {"$max": {"lastMessageAt": when}, "$setOnInsert": {"chatId": chat_id}}
+    if title:
+        update["$set"] = {"title": title}
+    await db.chat_state.update_one({"chatId": chat_id}, update, upsert=True)
+
+
+async def list_known_chats() -> list[dict[str, Any]]:
+    """Every chat the bot has seen, newest activity first — for the Mini App."""
+    db = get_db()
+    cursor = db.chat_state.find({}, {"chatId": 1, "title": 1, "lastMessageAt": 1}).sort(
+        "lastMessageAt", -1
     )
+    return [d async for d in cursor]
 
 
 async def get_dirty_chats() -> list[str]:

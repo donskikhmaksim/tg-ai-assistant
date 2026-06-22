@@ -75,7 +75,8 @@ async def on_business_message(message: Message) -> None:
             "messageId": message.message_id,
             "businessConnectionId": message.business_connection_id,
             "date": message.date,
-        }
+        },
+        title=message.chat.full_name or message.chat.username,
     )
 
 
@@ -110,7 +111,8 @@ async def on_group_message(message: Message) -> None:
             "messageId": message.message_id,
             "businessConnectionId": None,
             "date": message.date,
-        }
+        },
+        title=message.chat.title,
     )
 
 
