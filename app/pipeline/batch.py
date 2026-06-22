@@ -119,6 +119,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             "who": t.get("who", "me"),
             "counterpartyName": t.get("counterpartyName"),
             "deadline": t.get("deadline"),
+            "details": t.get("details"),
             "status": "open",
             "sourceMessageIds": t.get("source_message_ids", []),
             "dedupHash": dedup,
@@ -157,6 +158,9 @@ def _task_note(t: dict[str, Any], source_title: str | None = None) -> str:
     bits = []
     if source_title:
         bits.append(f"Источник: {source_title}")
+    details = (t.get("details") or "").strip()
+    if details:
+        bits.append(details)
     who = t.get("who")
     if who == "counterparty":
         name = t.get("counterpartyName")

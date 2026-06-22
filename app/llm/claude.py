@@ -39,14 +39,21 @@ SYSTEM_PROMPT = (
     "Do INCREMENTAL work:\n"
     "  - new_tasks: only tasks NOT already in the open-task list. For each: who is "
     "responsible (\"me\" = owner, \"counterparty\"), the counterparty's name if known, "
-    "an ISO date deadline (YYYY-MM-DD) or null, a suggested project name or null, and "
-    "the source message ids it came from. Do not invent deadlines.\n"
+    "an ISO date deadline (YYYY-MM-DD) or null, a suggested project name or null, the "
+    "source message ids it came from, and `details`. Do not invent deadlines.\n"
+    "    `details`: a short string with CONCRETE supporting specifics that are actually "
+    "present in the conversation and useful for doing the task — amounts/numbers, links, "
+    "addresses, phone numbers, names, constraints, the exact ask. Keep it factual and "
+    "terse. If the message carries no such specifics beyond the task title, set details "
+    "to null — never invent, pad, or restate the title.\n"
     "  - status_updates: for existing open tasks that later messages show as completed "
     "or cancelled, reference the task by its text and give new_status done|cancelled.\n"
-    "  - updated_summary: a compact running summary of the whole chat (what it's about, "
-    "agreements, open questions, who owes whom, key facts/preferences), updated to "
-    "reflect this window. This is the durable memory — write it to survive even after "
-    "the raw messages expire.\n\n"
+    "  - updated_summary: a COMPACT, STRUCTURED memory of the whole chat — short labeled "
+    "lines, not prose. Cover: people & roles, key facts/preferences, decisions, open "
+    "threads/questions, who owes whom. MERGE this window into the prior summary: keep it "
+    "concise (aim ~150 words), drop resolved/stale items, and correct facts that changed "
+    "— do NOT blindly append (this avoids drift and unbounded growth). This durable "
+    "memory must survive after the raw messages expire.\n\n"
     "Be conservative: extract real commitments, not hypotheticals or small talk. "
     "Return only the structured JSON."
 )
@@ -65,6 +72,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "deadline": {"type": ["string", "null"]},
                     "suggested_project": {"type": ["string", "null"]},
                     "source_message_ids": {"type": "array", "items": {"type": "integer"}},
+                    "details": {"type": ["string", "null"]},
                 },
                 "required": [
                     "task",
@@ -73,6 +81,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "deadline",
                     "suggested_project",
                     "source_message_ids",
+                    "details",
                 ],
                 "additionalProperties": False,
             },
