@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -19,6 +19,8 @@ from aiogram.types import (
 )
 
 from .. import repositories as repo
+from ..config import get_settings
+from ..transcribe import transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +48,37 @@ async def _owner_id() -> int | None:
     return int(val) if val is not None else None
 
 
-def _text_of(message: Message) -> str | None:
-    return message.text or message.caption
+async def _download(bot: Bot, file_id: str) -> bytes:
+    f = await bot.get_file(file_id)
+    buf = await bot.download_file(f.file_path)
+    return buf.read()
+
+
+async def _resolve_text(message: Message, bot: Bot) -> str | None:
+    """Text/caption if present; otherwise transcribe a voice/audio/video note.
+
+    Transcription runs on the Mac mini's Whisper service. Fails soft: if there's
+    no text and transcription is off or errors, we return None and skip capture.
+    """
+    text = message.text or message.caption
+    if text:
+        return text
+    media = message.voice or message.video_note or message.audio
+    if media is None or not get_settings().transcribe_url:
+        return None
+    try:
+        data = await _download(bot, media.file_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to download media for transcription")
+        return None
+    return await transcribe_audio(data, "audio.ogg")
 
 
 @router.business_message()
 @router.edited_business_message()
-async def on_business_message(message: Message) -> None:
+async def on_business_message(message: Message, bot: Bot) -> None:
     """Private 1-1 conversation via Telegram Business (incoming + owner's own)."""
-    text = _text_of(message)
+    text = await _resolve_text(message, bot)
     if not text:
         return  # nothing to extract from stickers/media-only
 
@@ -87,11 +111,11 @@ async def on_business_messages_deleted(event: BusinessMessagesDeleted) -> None:
 
 
 @router.message()
-async def on_group_message(message: Message) -> None:
+async def on_group_message(message: Message, bot: Bot) -> None:
     """Group messages (bot is a member with privacy off)."""
     if message.chat.type not in ("group", "supergroup"):
         return  # private chats with the bot are handled by the UI router
-    text = _text_of(message)
+    text = await _resolve_text(message, bot)
     if not text:
         return
 

@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     webapp_url: str = ""
     port: int = 8080
 
+    # Voice transcription (Whisper on the Mac mini, behind the same token-gated
+    # Funnel as Qwen). Empty → voice/audio messages are skipped (text only).
+    # Uses the same bearer token as Qwen (qwen_api_key).
+    transcribe_url: str = ""
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600
