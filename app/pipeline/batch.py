@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 
 
 async def run_batch() -> None:
-    chats = await repo.get_dirty_chats()
+    s = get_settings()
+    chats = await repo.get_dirty_chats(s.quiet_minutes, s.max_dirty_minutes)
     if not chats:
-        logger.debug("Batch: no dirty chats")
+        logger.debug("Batch: no chats ready")
         return
-    logger.info("Batch: processing %d dirty chat(s)", len(chats))
+    logger.info("Batch: processing %d ready chat(s)", len(chats))
     for chat_id in chats:
         try:
             await process_chat(chat_id)

@@ -30,7 +30,12 @@ class Settings(BaseSettings):
     ticktick_mcp_url: str = ""
 
     # Pipeline tuning
-    batch_interval_min: int = 30
+    batch_interval_min: int = 30  # scheduler tick; with debounce keep it small (2–3)
+    # Debounce: process a dirty chat only once it's been quiet for quiet_minutes
+    # (a settled thought, not mid-conversation), with a max-wait safety so a
+    # never-quiet chat is still processed within max_dirty_minutes.
+    quiet_minutes: int = 8
+    max_dirty_minutes: int = 45
     conv_gap_hours: int = 6
     max_lookback_hours: int = 48
     raw_ttl_days: int = 30

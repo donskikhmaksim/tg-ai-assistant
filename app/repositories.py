@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pymongo import ReturnDocument
@@ -42,7 +42,10 @@ async def save_raw_message(doc: dict[str, Any], title: str | None = None) -> Non
 
 async def touch_chat_state(chat_id: str, when: datetime, title: str | None = None) -> None:
     db = get_db()
-    update: dict[str, Any] = {"$max": {"lastMessageAt": when}, "$setOnInsert": {"chatId": chat_id}}
+    update: dict[str, Any] = {
+        "$max": {"lastMessageAt": when},
+        "$setOnInsert": {"chatId": chat_id, "firstSeenAt": when},
+    }
     if title:
         update["$set"] = {"title": title}
     await db.chat_state.update_one({"chatId": chat_id}, update, upsert=True)
@@ -64,11 +67,15 @@ async def get_chat_title(chat_id: str) -> str:
     return (doc or {}).get("title") or chat_id
 
 
-async def get_dirty_chats() -> list[str]:
-    """Chats with new messages since the last processed run.
+async def get_dirty_chats(quiet_minutes: int = 0, max_dirty_minutes: int = 0) -> list[str]:
+    """Chats ready for processing under a debounce policy.
 
-    A chat is dirty when lastMessageAt > lastProcessedAt (or was never
-    processed). Done in Python via $expr so the comparison is field-to-field.
+    A chat is *dirty* when lastMessageAt > lastProcessedAt (or it was never
+    processed). A dirty chat is *ready* when either:
+      - it has been quiet for `quiet_minutes` (settled thought, not mid-chat), or
+      - it has been dirty for `max_dirty_minutes` (max-wait safety so a chat
+        that never goes quiet is still processed).
+    With both thresholds at 0 this reduces to "every dirty chat" (legacy).
     """
     db = get_db()
     cursor = db.chat_state.find(
@@ -78,9 +85,25 @@ async def get_dirty_chats() -> list[str]:
                 {"$expr": {"$gt": ["$lastMessageAt", "$lastProcessedAt"]}},
             ]
         },
-        {"chatId": 1},
+        {"chatId": 1, "lastMessageAt": 1, "lastProcessedAt": 1, "firstSeenAt": 1},
     )
-    return [d["chatId"] async for d in cursor]
+    now = utcnow()
+    quiet = timedelta(minutes=quiet_minutes)
+    maxwait = timedelta(minutes=max_dirty_minutes)
+    ready: list[str] = []
+    async for d in cursor:
+        last_msg = d.get("lastMessageAt")
+        if last_msg is None:
+            continue
+        if quiet_minutes <= 0 and max_dirty_minutes <= 0:
+            ready.append(d["chatId"])
+            continue
+        quiet_ok = (now - last_msg) >= quiet
+        anchor = d.get("lastProcessedAt") or d.get("firstSeenAt") or last_msg
+        maxwait_ok = (now - anchor) >= maxwait
+        if quiet_ok or maxwait_ok:
+            ready.append(d["chatId"])
+    return ready
 
 
 async def mark_processed(chat_id: str) -> None:
