@@ -128,7 +128,15 @@ async def _resolve_default_section(project_id: str | None) -> str | None:
     name = s.default_section
     if not name or not project_id:
         return None
-    for c in await get_ticktick().get_sections(project_id):
+    sections = await get_ticktick().get_sections(project_id)
+    # Diagnostic: surface exactly what the server lists for this project, so the
+    # column id can be read from logs and pinned via DEFAULT_SECTION_ID.
+    logger.info(
+        "Sections in default project %s: %s",
+        project_id,
+        [(c.get("name"), c.get("id")) for c in sections],
+    )
+    for c in sections:
         if c["name"].strip().lower() == name.strip().lower():
             return c["id"]
     logger.info("Default section %r not found in project %s", name, project_id)
