@@ -19,7 +19,7 @@ from ..config import get_settings
 from ..llm import claude, qwen
 from ..ticktick.mcp_client import get_ticktick
 from . import retrieve as retrieval
-from .dedup import to_ticktick_due
+from .dedup import is_all_day_deadline, to_ticktick_due
 from .windows import build_window, render_window
 
 logger = logging.getLogger(__name__)
@@ -176,6 +176,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
                 content=note,
                 due_date=to_ticktick_due(t.get("deadline")),
                 section_id=section_id,
+                is_all_day=is_all_day_deadline(t.get("deadline")),
             )
             if tt_id:
                 await repo.set_task_ticktick_id(dedup, tt_id)

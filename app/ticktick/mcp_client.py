@@ -140,16 +140,20 @@ class TickTickMCP:
         content: str | None = None,
         due_date: str | None = None,
         section_id: str | None = None,
+        is_all_day: bool = False,
     ) -> str | None:
         """Create a task; returns the new TickTick task id (or None if unparsable).
 
         `section_id` is passed through as `column_id` to file the task under a
-        project section/column."""
+        project section/column. `is_all_day` marks a date-only deadline as an
+        all-day task (no clock time, no timezone shift)."""
         args: dict[str, Any] = {"title": title, "project_id": project_id}
         if content:
             args["content"] = content
         if due_date:
             args["due_date"] = due_date
+        if is_all_day:
+            args["is_all_day"] = True
         if section_id:
             args["column_id"] = section_id
         return _first_id(await self.call("create_task", args))
