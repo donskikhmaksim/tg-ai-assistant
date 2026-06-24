@@ -101,16 +101,33 @@ async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
     default_name = s.default_project
     # Prefer an explicit id (e.g. the built-in Inbox, which get_projects omits).
     if s.default_project_id:
-        return s.default_project_id, default_name or "Inbox", None
+        pid = s.default_project_id
+        return pid, default_name or "Inbox", await _resolve_default_section(pid)
     # Otherwise resolve the configured default project name to a real id.
     if default_name:
         try:
             for p in await get_ticktick().get_projects():
                 if p["name"] == default_name:
-                    return p["id"], p["name"], None
+                    return p["id"], p["name"], await _resolve_default_section(p["id"])
         except Exception:  # noqa: BLE001
             logger.exception("Default project lookup failed for %r", default_name)
     return None, default_name, None
+
+
+async def _resolve_default_section(project_id: str | None) -> str | None:
+    """Column id of the configured DEFAULT_SECTION inside `project_id`.
+
+    Unbound ("мои") tasks land in this section so they're easy to triage. None
+    if no section is configured, the project has no such column, or lookup
+    fails — in which case the task goes to the project root."""
+    name = get_settings().default_section
+    if not name or not project_id:
+        return None
+    for c in await get_ticktick().get_sections(project_id):
+        if c["name"].strip().lower() == name.strip().lower():
+            return c["id"]
+    logger.info("Default section %r not found in project %s", name, project_id)
+    return None
 
 
 async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> None:

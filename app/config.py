@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # (id like "inbox<uid>") is NOT returned by get_projects, so it can only be
     # targeted by id. Takes priority over default_project (name) when set.
     default_project_id: str = ""
+    # Name of the section/column inside the default project that unbound
+    # ("мои", from-Telegram) tasks land in, so they're easy to triage. Resolved
+    # to a column id at runtime via list_project_columns; if the column doesn't
+    # exist (or the project has no columns), tasks fall to the project root.
+    default_section: str = "TG"
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
