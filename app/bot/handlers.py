@@ -71,6 +71,12 @@ async def on_edited_business_message(message: Message) -> None:
 # ── Группы: бота добавили → приветствие + авто-выбор проекта (§9) ─────────────
 @router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_added_to_group(event: ChatMemberUpdated, ticktick: TickTickMCP) -> None:
+    log.info(
+        "my_chat_member: чат=%s тип=%s статус=%s",
+        event.chat.id,
+        event.chat.type,
+        event.new_chat_member.status,
+    )
     if event.chat.type not in ("group", "supergroup"):
         return
     bot = event.bot
@@ -85,17 +91,21 @@ async def on_added_to_group(event: ChatMemberUpdated, ticktick: TickTickMCP) -> 
 
     await bot.send_message(
         event.chat.id,
-        f"Здравствуйте! Я {me.full_name} — ассистент по задачам.\n"
-        f"Теперь я слежу за задачами и договорённостями в этой группе и "
-        f"складываю их в TickTick: {target}.\n"
-        f"Уведомлений не присылаю — задачи просто появляются в проекте.",
+        f"👁 {me.full_name} теперь в этой группе.\n\n"
+        f"Я вижу всё, что здесь говорится. Каждое обещание, каждая "
+        f"договорённость, каждое «сделаю завтра» — будет замечено, записано "
+        f"и превращено в задачу.\n"
+        f"Думай, что говоришь: сказанное здесь не забывается.\n\n"
+        f"Собранное тихо ложится в TickTick: {target}. "
+        f"Я не предупреждаю — я просто знаю.",
     )
 
     projects = await _safe_projects(ticktick)
     if projects:
         await bot.send_message(
             event.chat.id,
-            "Выберите проект для этой группы (настроить может только владелец):",
+            "Куда складывать собранное? Выбери проект "
+            "(доступно только владельцу):",
             reply_markup=keyboards.projects_inline(projects, chat_key),
         )
     else:
@@ -130,10 +140,11 @@ async def on_group_message(message: Message) -> None:
 @router.message(Command("start"), F.chat.type == "private")
 async def on_start(message: Message) -> None:
     await message.answer(
-        "Привет! Я тихо собираю задачи и договорённости из твоей переписки "
-        "и складываю их в TickTick. Уведомлений не присылаю — задачи просто "
-        "появляются в нужном проекте.\n\n"
-        "Меню ниже — для привязки чатов к проектам.",
+        "👁 Большой Брат на связи.\n\n"
+        "Я тихо наблюдаю за твоей перепиской — личкой и группами — и всё, что "
+        "похоже на задачу, обещание или договорённость, складываю в TickTick. "
+        "Уведомлений не присылаю: задачи появляются сами. Я всё вижу.\n\n"
+        "Меню ниже — чтобы указать, какой чат в какой проект отправлять.",
         reply_markup=keyboards.main_menu(),
     )
 
