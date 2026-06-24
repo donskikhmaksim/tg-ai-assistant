@@ -43,8 +43,18 @@ SYSTEM_PROMPT = (
     "Do INCREMENTAL work:\n"
     "  - new_tasks: only tasks NOT already in the open-task list. For each: who is "
     "responsible (\"me\" = owner, \"counterparty\"), the counterparty's name if known, "
-    "an ISO date deadline (YYYY-MM-DD) or null, a suggested project name or null, the "
-    "source message ids it came from, and `details`. Do not invent deadlines.\n"
+    "a deadline or null, a suggested project name or null, the source message ids it "
+    "came from, and `details`. Do not invent deadlines.\n"
+    "    deadline: a bare date `YYYY-MM-DD`, OR `YYYY-MM-DDThh:mm` (24h) when a specific "
+    "clock time was actually agreed. Use the time as spoken (wall-clock); do not convert "
+    "it. Never invent a time — if only a day was agreed, emit just the date.\n"
+    "    deadline_tz: an IANA timezone name ONLY if the conversation explicitly named a "
+    "city or zone for that time (e.g. \"по Москве\" -> \"Europe/Moscow\", \"по Хабаровску\" "
+    "-> \"Asia/Khabarovsk\", \"EST\" -> \"America/New_York\"); otherwise null (the backend "
+    "assumes the owner's home zone).\n"
+    "    from_name / to_name: in a GROUP, name the person who raised/assigned the task "
+    "(from_name = the message sender) and the person it is FOR / who must do it "
+    "(to_name). Use \"me\" for the owner. In a 1-1 DM, set both to null (it's implicit).\n"
     "    `details`: ONLY a concrete fact that helps do the task and is NOT already in "
     "the title — an amount, number, date, name, link, address, phone, id, or specific "
     "constraint. If you cannot name such a concrete fact, set details to null. NEVER "
@@ -76,6 +86,9 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "who": {"type": "string", "enum": ["me", "counterparty"]},
                     "counterpartyName": {"type": ["string", "null"]},
                     "deadline": {"type": ["string", "null"]},
+                    "deadline_tz": {"type": ["string", "null"]},
+                    "from_name": {"type": ["string", "null"]},
+                    "to_name": {"type": ["string", "null"]},
                     "suggested_project": {"type": ["string", "null"]},
                     "source_message_ids": {"type": "array", "items": {"type": "integer"}},
                     "details": {"type": ["string", "null"]},
@@ -85,6 +98,9 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "who",
                     "counterpartyName",
                     "deadline",
+                    "deadline_tz",
+                    "from_name",
+                    "to_name",
                     "suggested_project",
                     "source_message_ids",
                     "details",

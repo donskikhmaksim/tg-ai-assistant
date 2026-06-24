@@ -8,3 +8,5 @@ openai>=1.50
 mcp>=1.10,<2
 pydantic>=2.7
 pydantic-settings>=2.4
+# Timezone database for zoneinfo (python:3.12-slim ships without the system one).
+tzdata>=2024.1

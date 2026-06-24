@@ -135,6 +135,8 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
         return
     project_id, project_name, section_id = await _resolve_project(chat_id)
     source = _source_label(chat_id, await repo.get_chat_title(chat_id))
+    is_group = chat_id.startswith("group_")
+    default_tz = get_settings().default_timezone
     tt = get_ticktick()
 
     for t in new_tasks:
@@ -169,12 +171,12 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.info("Chat %s: task stored locally (no project bound): %s", chat_id, title)
             continue
         try:
-            note = _task_note(t, source)
+            note = _task_note(t, source, is_group=is_group)
             tt_id = await tt.create_task(
                 title=title,
                 project_id=project_id,
                 content=note,
-                due_date=to_ticktick_due(t.get("deadline")),
+                due_date=to_ticktick_due(t.get("deadline"), t.get("deadline_tz"), default_tz),
                 section_id=section_id,
                 is_all_day=is_all_day_deadline(t.get("deadline")),
             )
@@ -194,15 +196,28 @@ def _source_label(chat_id: str, title: str | None) -> str | None:
     return f"личка с «{title}»"
 
 
-def _task_note(t: dict[str, Any], source: str | None = None) -> str:
+def _person(value: str | None) -> str | None:
+    """Render a from/to name; the literal "me" becomes «я»."""
+    if not value:
+        return None
+    return "я" if value.strip().lower() == "me" else value.strip()
+
+
+def _task_note(t: dict[str, Any], source: str | None = None, is_group: bool = False) -> str:
     bits = []
     if source:
         bits.append(f"Источник: {source}")
+    if is_group:
+        # In a group "who said it" and "who must do it" can differ — show both.
+        frm = _person(t.get("from_name"))
+        to = _person(t.get("to_name"))
+        if frm or to:
+            bits.append(f"От: {frm or '—'} · Кому: {to or '—'}")
     details = (t.get("details") or "").strip()
     if details:
         bits.append(details)
-    # Only note responsibility when it's someone ELSE — own tasks need no label.
-    if t.get("who") == "counterparty":
+    # In a DM, note responsibility only when it's the counterparty (own → no label).
+    if not is_group and t.get("who") == "counterparty":
         name = t.get("counterpartyName")
         bits.append(f"Ответственный: {name}" if name else "Ответственный: собеседник")
     return "\n".join(bits)

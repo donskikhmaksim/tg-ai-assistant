@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # to a column id at runtime via list_project_columns; if the column doesn't
     # exist (or the project has no columns), tasks fall to the project root.
     default_section: str = "TG"
+    # Reference timezone for a deadline that has a clock time but no city/zone
+    # named in the conversation. IANA name. Tasks discussed without a timezone
+    # are interpreted here (the owner's home zone), not UTC.
+    default_timezone: str = "America/Los_Angeles"
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
