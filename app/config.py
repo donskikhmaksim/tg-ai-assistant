@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # to a column id at runtime via list_project_columns; if the column doesn't
     # exist (or the project has no columns), tasks fall to the project root.
     default_section: str = "TG"
+    # Explicit column id for the default section. Set this to bypass the
+    # name lookup entirely — required for the built-in Inbox, whose columns the
+    # API does NOT list (so default_section by name can't be resolved there).
+    # Takes priority over default_section when set.
+    default_section_id: str = ""
     # Reference timezone for a deadline that has a clock time but no city/zone
     # named in the conversation. IANA name. Tasks discussed without a timezone
     # are interpreted here (the owner's home zone), not UTC.

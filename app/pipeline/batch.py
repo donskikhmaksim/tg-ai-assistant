@@ -115,12 +115,17 @@ async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
 
 
 async def _resolve_default_section(project_id: str | None) -> str | None:
-    """Column id of the configured DEFAULT_SECTION inside `project_id`.
+    """Column id of the configured default section inside `project_id`.
 
-    Unbound ("мои") tasks land in this section so they're easy to triage. None
-    if no section is configured, the project has no such column, or lookup
-    fails — in which case the task goes to the project root."""
-    name = get_settings().default_section
+    Unbound ("мои") tasks land in this section so they're easy to triage.
+    DEFAULT_SECTION_ID (an explicit column id) wins and bypasses the name
+    lookup — necessary for the built-in Inbox, whose columns the API won't list.
+    Otherwise the column is found by name (DEFAULT_SECTION). None if nothing
+    matches or lookup fails — the task then goes to the project root."""
+    s = get_settings()
+    if s.default_section_id:
+        return s.default_section_id
+    name = s.default_section
     if not name or not project_id:
         return None
     for c in await get_ticktick().get_sections(project_id):
