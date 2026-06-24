@@ -4,10 +4,19 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import (
+    JOIN_TRANSITION,
+    ChatMemberUpdatedFilter,
+    Command,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BusinessConnection, CallbackQuery, Message
+from aiogram.types import (
+    BusinessConnection,
+    CallbackQuery,
+    ChatMemberUpdated,
+    Message,
+)
 
 from app.bot import ingest, keyboards
 from app.db import repositories as repo
@@ -24,6 +33,13 @@ async def _get_owner_id() -> int | None:
     if _owner_id is None:
         _owner_id = await repo.get_setting("owner_id")
     return _owner_id
+
+
+async def _is_owner(user_id: int | None) -> bool:
+    """True, если действие совершает владелец. Пока владелец неизвестен
+    (Business ещё не подключён) — не блокируем."""
+    owner_id = await _get_owner_id()
+    return owner_id is None or user_id == owner_id
 
 
 class BindFlow(StatesGroup):
@@ -52,16 +68,55 @@ async def on_edited_business_message(message: Message) -> None:
     await ingest.ingest_dm(message, await _get_owner_id())
 
 
+# ── Группы: бота добавили → приветствие + авто-выбор проекта (§9) ─────────────
+@router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
+async def on_added_to_group(event: ChatMemberUpdated, ticktick: TickTickMCP) -> None:
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    bot = event.bot
+    chat_key = f"group_{event.chat.id}"
+    me = await bot.me()
+
+    mapping = await repo.get_project_mapping(chat_key)
+    if mapping:
+        target = f"проект «{mapping.get('projectName', '?')}»"
+    else:
+        target = "проект по умолчанию (Inbox) — пока не выбран другой"
+
+    await bot.send_message(
+        event.chat.id,
+        f"Здравствуйте! Я {me.full_name} — ассистент по задачам.\n"
+        f"Теперь я слежу за задачами и договорённостями в этой группе и "
+        f"складываю их в TickTick: {target}.\n"
+        f"Уведомлений не присылаю — задачи просто появляются в проекте.",
+    )
+
+    projects = await _safe_projects(ticktick)
+    if projects:
+        await bot.send_message(
+            event.chat.id,
+            "Выберите проект для этой группы (настроить может только владелец):",
+            reply_markup=keyboards.projects_inline(projects, chat_key),
+        )
+    else:
+        await bot.send_message(
+            event.chat.id,
+            "Проект задаётся командой /bind (доступно только владельцу).",
+        )
+
+
 # ── Группы: обычные message с privacy off ─────────────────────────────────────
 @router.message(F.chat.type.in_({"group", "supergroup"}), Command("bind"))
 async def on_group_bind(message: Message, ticktick: TickTickMCP) -> None:
+    if not await _is_owner(message.from_user.id if message.from_user else None):
+        return  # чужие /bind в группе тихо игнорируем
     chat_key = f"group_{message.chat.id}"
     projects = await _safe_projects(ticktick)
     if not projects:
         await message.reply("Не удалось получить проекты TickTick.")
         return
     await message.reply(
-        "Выберите проект для этой группы:",
+        "Выберите проект для этой группы (настроить может только владелец):",
         reply_markup=keyboards.projects_inline(projects, chat_key),
     )
 
@@ -141,6 +196,9 @@ async def on_unbind_menu(message: Message) -> None:
 # ── Инлайн-колбэки ────────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("bind|"))
 async def on_bind_callback(call: CallbackQuery, ticktick: TickTickMCP) -> None:
+    if not await _is_owner(call.from_user.id):
+        await call.answer("Настраивать привязки может только владелец.", show_alert=True)
+        return
     _, chat_key, project_id = call.data.split("|", 2)
     name = await _project_name(ticktick, project_id)
     await repo.set_project_mapping(chat_key, project_id, name)
@@ -151,6 +209,9 @@ async def on_bind_callback(call: CallbackQuery, ticktick: TickTickMCP) -> None:
 
 @router.callback_query(F.data.startswith("unbind|"))
 async def on_unbind_callback(call: CallbackQuery) -> None:
+    if not await _is_owner(call.from_user.id):
+        await call.answer("Настраивать привязки может только владелец.", show_alert=True)
+        return
     _, chat_key = call.data.split("|", 1)
     removed = await repo.unset_project_mapping(chat_key)
     await call.answer("Отвязано" if removed else "Не найдено")
