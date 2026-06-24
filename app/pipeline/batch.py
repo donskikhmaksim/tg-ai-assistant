@@ -134,7 +134,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
     if not new_tasks:
         return
     project_id, project_name, section_id = await _resolve_project(chat_id)
-    source_title = await repo.get_chat_title(chat_id)
+    source = _source_label(chat_id, await repo.get_chat_title(chat_id))
     tt = get_ticktick()
 
     for t in new_tasks:
@@ -169,7 +169,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.info("Chat %s: task stored locally (no project bound): %s", chat_id, title)
             continue
         try:
-            note = _task_note(t, source_title)
+            note = _task_note(t, source)
             tt_id = await tt.create_task(
                 title=title,
                 project_id=project_id,
@@ -184,10 +184,19 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.exception("Chat %s: TickTick create_task failed for '%s'", chat_id, title)
 
 
-def _task_note(t: dict[str, Any], source_title: str | None = None) -> str:
+def _source_label(chat_id: str, title: str | None) -> str | None:
+    """Human-readable task source: group vs DM, with its name."""
+    if not title:
+        return "группа" if chat_id.startswith("group_") else None
+    if chat_id.startswith("group_"):
+        return f"группа «{title}»"
+    return f"личка с «{title}»"
+
+
+def _task_note(t: dict[str, Any], source: str | None = None) -> str:
     bits = []
-    if source_title:
-        bits.append(f"Источник: {source_title}")
+    if source:
+        bits.append(f"Источник: {source}")
     details = (t.get("details") or "").strip()
     if details:
         bits.append(details)
