@@ -54,15 +54,28 @@ def _first_id(text: str) -> str | None:
 # Tolerant key/name parsing for both projects and columns.
 _NAME_RE = re.compile(r"^(?:Name|Title|Column|Section|Раздел)\s*:\s*(.+)$", re.I)
 _KV_ID_RE = re.compile(r"^ID\s*:\s*(\S+)\s*$", re.I)
+# list_project_columns format: "- <name>  (id: <id>)".
+_BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
 
 
 def _parse_pairs(text: str) -> list[dict[str, str]]:
     """Parse a list of {name, id} from the server's formatted output.
 
-    Handles both the `Name:`/`ID:` block format used by get_projects and a JSON
-    array fallback, so the columns output is parsed whatever its exact shape.
+    Handles three shapes: the `- <name>  (id: <id>)` lines from
+    list_project_columns, the `Name:`/`ID:` blocks from get_projects, and a
+    JSON array fallback — so it copes whatever the exact format is.
     """
     pairs: list[dict[str, str]] = []
+
+    # Format A: "- <name>  (id: <id>)" per line (list_project_columns).
+    for line in text.splitlines():
+        m = _BULLET_ID_RE.match(line.strip())
+        if m:
+            pairs.append({"name": m.group(1).strip(), "id": m.group(2).strip()})
+    if pairs:
+        return pairs
+
+    # Format B: "Name:" / "ID:" blocks (get_projects).
     name: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
@@ -76,7 +89,7 @@ def _parse_pairs(text: str) -> list[dict[str, str]]:
     if pairs:
         return pairs
 
-    # JSON fallback: [{"id": ..., "name"/"title": ...}, ...]
+    # Format C: JSON array [{"id": ..., "name"/"title": ...}, ...].
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
