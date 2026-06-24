@@ -5,15 +5,22 @@ The backend is the MCP *client*; Claude never touches MCP directly.
 
 Tool surface (confirmed against the ticktick-mcp source):
   - get_projects() -> formatted text
-  - create_task(title, project_id, content=, due_date=, ...) -> formatted text
-  - update_task(task_id, project_id, ...) -> formatted text
+  - list_project_columns(project_id) -> formatted text   (sections / "разделы")
+  - create_task(title, project_id, content=, due_date=, column_id=, ...) -> text
+  - update_task(task_id, project_id, column_id=, ...) -> formatted text
   - complete_task(project_id, task_id) -> formatted text
+
+Sections are TickTick "columns": list them with `list_project_columns` and
+file a task into one by passing `column_id` to create_task. (column_id is a
+v2 field absent from the Open API, but the server accepts it transparently.)
+If a project has no columns we simply skip the section step.
 
 These tools return human-readable strings, not JSON, so we parse the
 `Name:`/`ID:` lines out of the output.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -44,18 +51,51 @@ def _first_id(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _parse_projects(text: str) -> list[dict[str, str]]:
-    """Parse `get_projects` output: blocks of `Name: ...` / `ID: ...`."""
-    projects: list[dict[str, str]] = []
+# Tolerant key/name parsing for both projects and columns.
+_NAME_RE = re.compile(r"^(?:Name|Title|Column|Section|Раздел)\s*:\s*(.+)$", re.I)
+_KV_ID_RE = re.compile(r"^ID\s*:\s*(\S+)\s*$", re.I)
+
+
+def _parse_pairs(text: str) -> list[dict[str, str]]:
+    """Parse a list of {name, id} from the server's formatted output.
+
+    Handles both the `Name:`/`ID:` block format used by get_projects and a JSON
+    array fallback, so the columns output is parsed whatever its exact shape.
+    """
+    pairs: list[dict[str, str]] = []
     name: str | None = None
     for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("Name:"):
-            name = line[len("Name:"):].strip()
-        elif line.startswith("ID:") and name is not None:
-            projects.append({"name": name, "id": line[len("ID:"):].strip()})
+        stripped = line.strip()
+        m_name = _NAME_RE.match(stripped)
+        m_id = _KV_ID_RE.match(stripped)
+        if m_name:
+            name = m_name.group(1).strip()
+        elif m_id and name is not None:
+            pairs.append({"name": name, "id": m_id.group(1).strip()})
             name = None
-    return projects
+    if pairs:
+        return pairs
+
+    # JSON fallback: [{"id": ..., "name"/"title": ...}, ...]
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return pairs
+    items = data if isinstance(data, list) else data.get("columns") or data.get("sections") if isinstance(data, dict) else None
+    if isinstance(items, list):
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            ident = it.get("id") or it.get("columnId") or it.get("sectionId")
+            label = it.get("name") or it.get("title") or it.get("label")
+            if ident and label:
+                pairs.append({"name": str(label), "id": str(ident)})
+    return pairs
+
+
+def _parse_projects(text: str) -> list[dict[str, str]]:
+    """Parse `get_projects` output: blocks of `Name: ...` / `ID: ...`."""
+    return _parse_pairs(text)
 
 
 class TickTickMCP:
@@ -83,19 +123,35 @@ class TickTickMCP:
     async def get_projects(self) -> list[dict[str, str]]:
         return _parse_projects(await self.call("get_projects", {}))
 
+    async def get_sections(self, project_id: str) -> list[dict[str, str]]:
+        """List a project's sections (TickTick columns). Empty if it has none."""
+        try:
+            return _parse_pairs(
+                await self.call("list_project_columns", {"project_id": project_id})
+            )
+        except Exception:  # noqa: BLE001 — sections are best-effort
+            logger.exception("list_project_columns failed for project %s", project_id)
+            return []
+
     async def create_task(
         self,
         title: str,
         project_id: str,
         content: str | None = None,
         due_date: str | None = None,
+        section_id: str | None = None,
     ) -> str | None:
-        """Create a task; returns the new TickTick task id (or None if unparsable)."""
+        """Create a task; returns the new TickTick task id (or None if unparsable).
+
+        `section_id` is passed through as `column_id` to file the task under a
+        project section/column."""
         args: dict[str, Any] = {"title": title, "project_id": project_id}
         if content:
             args["content"] = content
         if due_date:
             args["due_date"] = due_date
+        if section_id:
+            args["column_id"] = section_id
         return _first_id(await self.call("create_task", args))
 
     async def complete_task(self, project_id: str, task_id: str) -> str:

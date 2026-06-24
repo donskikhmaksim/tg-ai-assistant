@@ -195,11 +195,26 @@ async def get_project_binding(chat_id: str) -> dict[str, Any] | None:
     return await db.chat_project_map.find_one({"chatId": chat_id})
 
 
-async def set_project_binding(chat_id: str, project_id: str, project_name: str) -> None:
+async def set_project_binding(
+    chat_id: str,
+    project_id: str,
+    project_name: str,
+    section_id: str | None = None,
+    section_name: str | None = None,
+) -> None:
     db = get_db()
     await db.chat_project_map.update_one(
         {"chatId": chat_id},
-        {"$set": {"ticktickProjectId": project_id, "projectName": project_name}, "$setOnInsert": {"chatId": chat_id}},
+        {
+            "$set": {
+                "ticktickProjectId": project_id,
+                "projectName": project_name,
+                # Stored even when None so re-binding without a section clears it.
+                "ticktickSectionId": section_id,
+                "sectionName": section_name,
+            },
+            "$setOnInsert": {"chatId": chat_id},
+        },
         upsert=True,
     )
 

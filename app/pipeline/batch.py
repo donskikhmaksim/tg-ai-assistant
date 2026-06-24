@@ -80,39 +80,43 @@ async def process_chat(chat_id: str) -> None:
     await repo.mark_processed(chat_id)
 
 
-async def _resolve_project(chat_id: str) -> tuple[str | None, str]:
-    """Returns (projectId, projectName) for a chat's tasks.
+async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
+    """Returns (projectId, projectName, sectionId) for a chat's tasks.
 
-    Explicit binding wins. Otherwise tasks fall back to the configured default
-    project (DEFAULT_PROJECT), resolved by name to a real TickTick id so they
-    actually land in an inbox instead of only being stored locally. If the
-    default name matches no project, we return (None, name) and the task stays
-    local until the chat is bound.
+    Explicit binding wins (and may pin a section/column). Otherwise tasks fall
+    back to the configured default project (DEFAULT_PROJECT), resolved by name
+    to a real TickTick id so they actually land in an inbox instead of only
+    being stored locally. If the default name matches no project, we return
+    (None, name, None) and the task stays local until the chat is bound.
     """
     binding = await repo.get_project_binding(chat_id)
     if binding:
-        return binding["ticktickProjectId"], binding.get("projectName", "")
+        return (
+            binding["ticktickProjectId"],
+            binding.get("projectName", ""),
+            binding.get("ticktickSectionId"),
+        )
 
     s = get_settings()
     default_name = s.default_project
     # Prefer an explicit id (e.g. the built-in Inbox, which get_projects omits).
     if s.default_project_id:
-        return s.default_project_id, default_name or "Inbox"
+        return s.default_project_id, default_name or "Inbox", None
     # Otherwise resolve the configured default project name to a real id.
     if default_name:
         try:
             for p in await get_ticktick().get_projects():
                 if p["name"] == default_name:
-                    return p["id"], p["name"]
+                    return p["id"], p["name"], None
         except Exception:  # noqa: BLE001
             logger.exception("Default project lookup failed for %r", default_name)
-    return None, default_name
+    return None, default_name, None
 
 
 async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> None:
     if not new_tasks:
         return
-    project_id, project_name = await _resolve_project(chat_id)
+    project_id, project_name, section_id = await _resolve_project(chat_id)
     source_title = await repo.get_chat_title(chat_id)
     tt = get_ticktick()
 
@@ -154,6 +158,7 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
                 project_id=project_id,
                 content=note,
                 due_date=to_ticktick_due(t.get("deadline")),
+                section_id=section_id,
             )
             if tt_id:
                 await repo.set_task_ticktick_id(dedup, tt_id)
