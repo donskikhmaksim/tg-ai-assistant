@@ -36,6 +36,7 @@ from aiogram.types import (
 from .. import repositories as repo
 from ..config import get_settings
 from ..ticktick.mcp_client import get_ticktick
+from .notify import group_watch_announcement
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,18 @@ def _chat_key_from_callback(callback: CallbackQuery) -> str | None:
     return f"user_{msg.chat.id}"
 
 
+async def _confirm_bind(
+    callback: CallbackQuery, chat_key: str, project_name: str, section_name: str | None = None
+) -> None:
+    """Edit the picker into a confirmation. In a group it's the Big Brother
+    'отбивка' announcing what surveillance now feeds into."""
+    if chat_key.startswith("group_"):
+        await _safe_edit(callback, group_watch_announcement(project_name, section_name))
+    else:
+        target = f"«{project_name}»" + (f" / раздел «{section_name}»" if section_name else "")
+        await _safe_edit(callback, f"📌 `{chat_key}` → {target} ✅")
+
+
 async def _safe_edit(
     callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None
 ) -> None:
@@ -232,11 +245,7 @@ async def on_pick_project(callback: CallbackQuery) -> None:
         # No sections on this project — bind right away.
         await repo.set_project_binding(chat_key, project_id, project_name)
         await callback.answer("Привязано ✅")
-        await _safe_edit(
-            callback,
-            f"📌 `{chat_key}` → проект «{project_name}» ✅\n"
-            "Разделов у проекта нет — задачи лягут в корень.",
-        )
+        await _confirm_bind(callback, chat_key, project_name)
         return
 
     await callback.answer()
@@ -266,16 +275,13 @@ async def on_pick_section(callback: CallbackQuery) -> None:
     if section_id == "none":
         await repo.set_project_binding(chat_key, project_id, project_name)
         await callback.answer("Привязано ✅")
-        await _safe_edit(callback, f"📌 `{chat_key}` → проект «{project_name}» ✅")
+        await _confirm_bind(callback, chat_key, project_name)
         return
 
     section_name = await _section_name(project_id, section_id)
     await repo.set_project_binding(chat_key, project_id, project_name, section_id, section_name)
     await callback.answer("Привязано ✅")
-    await _safe_edit(
-        callback,
-        f"📌 `{chat_key}` → «{project_name}» / раздел «{section_name}» ✅",
-    )
+    await _confirm_bind(callback, chat_key, project_name, section_name)
 
 
 # ---------------------------------------------------------------------------

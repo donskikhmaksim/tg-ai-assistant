@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..telegram.notify import group_watch_announcement
 from ..ticktick.mcp_client import get_ticktick
 from .auth import validate_init_data
 
@@ -70,12 +71,29 @@ async def api_data(request: web.Request) -> web.Response:
             "title": c.get("title") or c["chatId"],
             "kind": "group" if c["chatId"].startswith("group_") else "dm",
             "boundProjectId": bindings.get(c["chatId"], {}).get("ticktickProjectId"),
+            "boundSectionId": bindings.get(c["chatId"], {}).get("ticktickSectionId"),
+            "boundSectionName": bindings.get(c["chatId"], {}).get("sectionName"),
         }
         for c in chats
     ]
     return web.json_response(
         {"projects": projects, "chats": out_chats, "botUsername": await _bot_username(request)}
     )
+
+
+async def api_sections(request: web.Request) -> web.Response:
+    """List a project's sections (columns) for the section picker."""
+    await _require_owner(request)
+    body = await request.json()
+    project_id = (body or {}).get("projectId")
+    if not project_id:
+        return web.json_response({"error": "projectId required"}, status=400)
+    try:
+        sections = await get_ticktick().get_sections(project_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("get_sections failed")
+        return web.json_response({"error": "ticktick_unreachable"}, status=502)
+    return web.json_response({"sections": sections})
 
 
 async def _bot_username(request: web.Request) -> str:
@@ -96,6 +114,7 @@ async def api_bind(request: web.Request) -> web.Response:
     body = await request.json()
     chat_id = (body or {}).get("chatId")
     project_id = (body or {}).get("projectId")
+    section_id = (body or {}).get("sectionId") or None
     if not chat_id or not project_id:
         return web.json_response({"error": "chatId and projectId required"}, status=400)
 
@@ -105,9 +124,31 @@ async def api_bind(request: web.Request) -> web.Response:
     if not name:
         return web.json_response({"error": "unknown project"}, status=400)
 
-    await repo.set_project_binding(chat_id, project_id, name)
-    logger.info("Mini App: bound %s -> %s (%s)", chat_id, name, project_id)
-    return web.json_response({"ok": True, "projectName": name})
+    # Resolve the section name too (best-effort) for a readable binding.
+    section_name = None
+    if section_id:
+        try:
+            for s in await get_ticktick().get_sections(project_id):
+                if s["id"] == section_id:
+                    section_name = s["name"]
+                    break
+        except Exception:  # noqa: BLE001
+            logger.exception("section name lookup failed")
+
+    await repo.set_project_binding(chat_id, project_id, name, section_id, section_name)
+    logger.info("Mini App: bound %s -> %s / %s (%s)", chat_id, name, section_name, project_id)
+
+    # Announce in the group that surveillance now feeds this project/section.
+    if chat_id.startswith("group_"):
+        try:
+            gid = int(chat_id[len("group_"):])
+            await request.app["bot"].send_message(
+                gid, group_watch_announcement(name, section_name)
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to announce binding in group %s", chat_id)
+
+    return web.json_response({"ok": True, "projectName": name, "sectionName": section_name})
 
 
 async def api_unbind(request: web.Request) -> web.Response:
@@ -130,6 +171,7 @@ def build_app(bot: Any) -> web.Application:
             web.get("/health", health),
             web.get("/app", serve_app),
             web.post("/api/data", api_data),
+            web.post("/api/sections", api_sections),
             web.post("/api/bind", api_bind),
             web.post("/api/unbind", api_unbind),
         ]

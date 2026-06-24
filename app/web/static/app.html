@@ -93,6 +93,14 @@
       return none + opts;
     }
 
+    function sectionOptions(sections, selectedId) {
+      const none = `<option value="">— без раздела —</option>`;
+      const opts = sections.map(s =>
+        `<option value="${s.id}" ${s.id === selectedId ? "selected" : ""}>${esc(s.name)}</option>`
+      ).join("");
+      return none + opts;
+    }
+
     function esc(s) {
       return String(s).replace(/[&<>"']/g, c =>
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -126,20 +134,43 @@
             <div class="name">${esc(c.title)}</div>
             <div class="id">${esc(c.chatId)}</div>
           </div>
-          <select>${optionList(projects, c.boundProjectId)}</select>
+          <select class="proj">${optionList(projects, c.boundProjectId)}</select>
+          <select class="sect" style="display:none"></select>
           <div class="saved"></div>`;
-        const sel = row.querySelector("select");
+        const selP = row.querySelector(".proj");
+        const selS = row.querySelector(".sect");
         const saved = row.querySelector(".saved");
-        sel.addEventListener("change", async () => {
-          const pid = sel.value;
+
+        function showSect(v) { selS.style.display = v ? "block" : "none"; }
+
+        // Load a project's sections into the second dropdown. Hidden if none.
+        async function loadSections(projectId, selectedSectionId) {
+          selS.innerHTML = `<option value="">— загрузка разделов… —</option>`;
+          showSect(true);
+          try {
+            const r = await api("/api/sections", { projectId });
+            const secs = r.sections || [];
+            if (!secs.length) { showSect(false); return; }
+            selS.innerHTML = sectionOptions(secs, selectedSectionId);
+          } catch (e) {
+            showSect(false);
+          }
+        }
+
+        if (c.boundProjectId) loadSections(c.boundProjectId, c.boundSectionId);
+
+        selP.addEventListener("change", async () => {
+          const pid = selP.value;
           saved.textContent = "Сохраняю…";
           try {
             if (pid) {
               const r = await api("/api/bind", { chatId: c.chatId, projectId: pid });
               saved.textContent = "✓ " + r.projectName;
+              await loadSections(pid, null);
             } else {
               await api("/api/unbind", { chatId: c.chatId });
               saved.textContent = "Отвязано";
+              showSect(false);
             }
             tg?.HapticFeedback?.notificationOccurred("success");
             toast("Сохранено");
@@ -148,6 +179,23 @@
             tg?.HapticFeedback?.notificationOccurred("error");
           }
         });
+
+        selS.addEventListener("change", async () => {
+          const pid = selP.value;
+          if (!pid) return;
+          saved.textContent = "Сохраняю…";
+          try {
+            const r = await api("/api/bind",
+              { chatId: c.chatId, projectId: pid, sectionId: selS.value });
+            saved.textContent = "✓ " + r.projectName + (r.sectionName ? " / " + r.sectionName : "");
+            tg?.HapticFeedback?.notificationOccurred("success");
+            toast("Сохранено");
+          } catch (e) {
+            saved.textContent = "Ошибка: " + e.message;
+            tg?.HapticFeedback?.notificationOccurred("error");
+          }
+        });
+
         $content.appendChild(row);
       }
     }
