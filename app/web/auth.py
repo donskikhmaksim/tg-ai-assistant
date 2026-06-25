@@ -39,3 +39,20 @@ def validate_init_data(init_data: str, bot_token: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             pass
     return {"user": user, "auth_date": pairs.get("auth_date")}
+
+
+def chat_link_token(chat_id: str, bot_token: str) -> str:
+    """Unguessable token for a chat-transcript link (HMAC keyed by bot token).
+
+    Lets a plain link in a TickTick task open the transcript page without
+    Telegram initData, while preventing anyone from enumerating other chats."""
+    return hmac.new(
+        bot_token.encode(), f"chat:{chat_id}".encode(), hashlib.sha256
+    ).hexdigest()[:24]
+
+
+def verify_chat_token(chat_id: str, token: str, bot_token: str) -> bool:
+    if not chat_id or not token or not bot_token:
+        return False
+    return hmac.compare_digest(chat_link_token(chat_id, bot_token), token)
+

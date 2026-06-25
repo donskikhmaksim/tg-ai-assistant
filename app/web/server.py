@@ -10,9 +10,12 @@ same-origin and need no CORS.
 """
 from __future__ import annotations
 
+import html
 import logging
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
@@ -20,7 +23,7 @@ from .. import repositories as repo
 from ..config import get_settings
 from ..telegram.notify import group_watch_announcement
 from ..ticktick.mcp_client import get_ticktick
-from .auth import validate_init_data
+from .auth import validate_init_data, verify_chat_token
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +54,69 @@ async def health(_: web.Request) -> web.Response:
 
 
 async def serve_app(_: web.Request) -> web.Response:
-    html = (_STATIC / "app.html").read_text(encoding="utf-8")
-    return web.Response(text=html, content_type="text/html")
+    page = (_STATIC / "app.html").read_text(encoding="utf-8")
+    return web.Response(text=page, content_type="text/html")
+
+
+def _local_dt(dt: Any, tz_name: str) -> str:
+    try:
+        zone = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+        zone = timezone.utc
+    try:
+        return dt.astimezone(zone).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, OSError, AttributeError):
+        return ""
+
+
+async def serve_chat(request: web.Request) -> web.Response:
+    """Render a chat's stored transcript. Auth via the signed token in the URL
+    (so a plain link from a TickTick task works without Telegram initData)."""
+    chat_id = request.query.get("c", "")
+    token = request.query.get("t", "")
+    if not verify_chat_token(chat_id, token, get_settings().bot_token):
+        raise web.HTTPForbidden(text="invalid or expired link")
+
+    title = await repo.get_chat_title(chat_id)
+    messages = await repo.get_chat_messages(chat_id)
+    tz_name = get_settings().default_timezone
+
+    rows = []
+    for m in messages:
+        when = _local_dt(m.get("date"), tz_name)
+        who = html.escape(m.get("senderName") or ("Я" if m.get("direction") == "out" else "—"))
+        cls = "out" if m.get("direction") == "out" else "in"
+        text = html.escape(m.get("text") or "")
+        rows.append(
+            f'<div class="msg {cls}"><div class="meta">{html.escape(when)} · {who}</div>'
+            f'<div class="text">{text}</div></div>'
+        )
+    body = "\n".join(rows) or '<div class="empty">Сообщений пока нет.</div>'
+    page = _CHAT_TEMPLATE.format(title=html.escape(title), body=body, count=len(messages))
+    return web.Response(text=page, content_type="text/html")
+
+
+_CHAT_TEMPLATE = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Переписка — {title}</title>
+<style>
+  body {{ margin:0; padding:16px; max-width:760px; margin:0 auto;
+    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0f1115; color:#e8e8ea; }}
+  h1 {{ font-size:18px; margin:4px 0 2px; }}
+  .sub {{ color:#8a8f98; font-size:12px; margin-bottom:16px; }}
+  .msg {{ padding:8px 12px; margin:6px 0; border-radius:12px; background:#1b1e26; }}
+  .msg.out {{ background:#1d2b3a; }}
+  .meta {{ color:#8a8f98; font-size:11px; margin-bottom:3px; }}
+  .text {{ white-space:pre-wrap; word-break:break-word; }}
+  .empty {{ color:#8a8f98; text-align:center; margin-top:40px; }}
+</style></head>
+<body>
+  <h1>{title}</h1>
+  <div class="sub">Сохранённая переписка · сообщений: {count}</div>
+  {body}
+</body></html>"""
 
 
 async def api_data(request: web.Request) -> web.Response:
@@ -170,6 +234,7 @@ def build_app(bot: Any) -> web.Application:
             web.get("/", health),
             web.get("/health", health),
             web.get("/app", serve_app),
+            web.get("/chat", serve_chat),
             web.post("/api/data", api_data),
             web.post("/api/sections", api_sections),
             web.post("/api/bind", api_bind),

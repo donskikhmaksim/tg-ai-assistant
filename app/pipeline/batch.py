@@ -12,14 +12,17 @@ For each dirty chat:
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 from typing import Any
+from urllib.parse import quote
 
 from .. import repositories as repo
 from ..config import get_settings
 from ..llm import claude, qwen
 from ..ticktick.mcp_client import get_ticktick
+from ..web.auth import chat_link_token
 from . import retrieve as retrieval
-from .dedup import is_all_day_deadline, to_ticktick_due
+from .dedup import _zone, is_all_day_deadline, to_ticktick_due
 from .windows import build_window, render_window
 
 logger = logging.getLogger(__name__)
@@ -74,7 +77,7 @@ async def process_chat(chat_id: str) -> None:
     if new_summary:
         await repo.set_summary(chat_id, new_summary)
 
-    await _create_new_tasks(chat_id, result.get("new_tasks", []))
+    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages)
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []))
 
     await repo.mark_processed(chat_id)
@@ -143,13 +146,17 @@ async def _resolve_default_section(project_id: str | None) -> str | None:
     return None
 
 
-async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> None:
+async def _create_new_tasks(
+    chat_id: str, new_tasks: list[dict[str, Any]], messages: list[dict[str, Any]] | None = None
+) -> None:
     if not new_tasks:
         return
     project_id, project_name, section_id = await _resolve_project(chat_id)
     source = _source_label(chat_id, await repo.get_chat_title(chat_id))
     is_group = chat_id.startswith("group_")
     default_tz = get_settings().default_timezone
+    date_by_id = {m["messageId"]: m.get("date") for m in (messages or [])}
+    link = _chat_link(chat_id)
     tt = get_ticktick()
 
     for t in new_tasks:
@@ -184,7 +191,8 @@ async def _create_new_tasks(chat_id: str, new_tasks: list[dict[str, Any]]) -> No
             logger.info("Chat %s: task stored locally (no project bound): %s", chat_id, title)
             continue
         try:
-            note = _task_note(t, source, is_group=is_group)
+            when = _source_time(t.get("source_message_ids"), date_by_id, default_tz)
+            note = _task_note(t, source, when=when, link=link, is_group=is_group)
             tt_id = await tt.create_task(
                 title=title,
                 project_id=project_id,
@@ -216,24 +224,66 @@ def _person(value: str | None) -> str | None:
     return "я" if value.strip().lower() == "me" else value.strip()
 
 
-def _task_note(t: dict[str, Any], source: str | None = None, is_group: bool = False) -> str:
-    bits = []
+def _source_time(
+    ids: list[int] | None, date_by_id: dict[int, Any], tz_name: str
+) -> str | None:
+    """When the task was said: time of the latest source message, in tz_name."""
+    dates = [date_by_id.get(i) for i in (ids or []) if date_by_id.get(i)]
+    if not dates:
+        return None
+    dt = max(dates)
+    zone = _zone(tz_name) or timezone.utc
+    try:
+        return dt.astimezone(zone).strftime("%d.%m %H:%M")
+    except (ValueError, OSError):
+        return None
+
+
+def _chat_link(chat_id: str) -> str | None:
+    """Link to the transcript page for this chat (token-gated). None if no
+    WEBAPP_URL configured."""
+    s = get_settings()
+    base = (s.webapp_url or "").rstrip("/")
+    if not base:
+        return None
+    token = chat_link_token(chat_id, s.bot_token)
+    return f"{base}/chat?c={quote(chat_id)}&t={token}"
+
+
+def _task_note(
+    t: dict[str, Any],
+    source: str | None = None,
+    when: str | None = None,
+    link: str | None = None,
+    is_group: bool = False,
+) -> str:
+    # Markdown — TickTick renders it in the task description.
+    meta = []
     if source:
-        bits.append(f"Источник: {source}")
+        meta.append(f"**Источник:** {source}")
     if is_group:
         # In a group "who said it" and "who must do it" can differ — show both.
         frm = _person(t.get("from_name"))
         to = _person(t.get("to_name"))
         if frm or to:
-            bits.append(f"От: {frm or '—'} · Кому: {to or '—'}")
-    details = (t.get("details") or "").strip()
-    if details:
-        bits.append(details)
+            meta.append(f"**От:** {frm or '—'} · **Кому:** {to or '—'}")
+    if when:
+        meta.append(f"**Когда:** {when}")
     # In a DM, note responsibility only when it's the counterparty (own → no label).
     if not is_group and t.get("who") == "counterparty":
         name = t.get("counterpartyName")
-        bits.append(f"Ответственный: {name}" if name else "Ответственный: собеседник")
-    return "\n".join(bits)
+        meta.append(f"**Ответственный:** {name or 'собеседник'}")
+
+    blocks = []
+    if meta:
+        # Hard line breaks inside the meta block (two trailing spaces = <br> in md).
+        blocks.append("  \n".join(meta))
+    details = (t.get("details") or "").strip()
+    if details:
+        blocks.append(details)
+    if link:
+        blocks.append(f"[💬 Прочитать переписку]({link})")
+    return "\n\n".join(blocks)
 
 
 async def _apply_status_updates(
