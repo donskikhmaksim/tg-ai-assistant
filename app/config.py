@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # are interpreted here (the owner's home zone), not UTC.
     default_timezone: str = "America/Los_Angeles"
 
+    # Onboarding — GitHub collaborator invite
+    # Fine-grained PAT with repo > collaborators write permission on GITHUB_REPO.
+    github_token: str = ""
+    github_repo: str = ""  # owner/name, e.g. "donskikhmaksim/tg-ai-assistant"
+
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
     # Railway injects PORT; the aiohttp server binds it. WEBAPP_URL drives the

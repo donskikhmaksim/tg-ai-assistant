@@ -22,6 +22,8 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.filters import ChatMemberUpdatedFilter, Command, CommandStart, JOIN_TRANSITION
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
@@ -33,6 +35,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+from .. import github as gh
+
 from .. import repositories as repo
 from ..config import get_settings
 from ..ticktick.mcp_client import get_ticktick
@@ -41,6 +45,10 @@ from .notify import group_watch_announcement
 logger = logging.getLogger(__name__)
 
 router = Router(name="ui")
+
+
+class Onboarding(StatesGroup):
+    waiting_github = State()
 
 BTN_BIND = "🔗 Привязать проект"
 BTN_LIST = "📋 Мои привязки"
@@ -297,15 +305,82 @@ async def cmd_app(message: Message) -> None:
     await message.answer("Открыть управление привязками:", reply_markup=_main_menu())
 
 
+def _deploy_prompt(repo: str) -> str:
+    return (
+        f"Please help me deploy my own instance of the tg-ai-assistant.\n\n"
+        f"Steps:\n"
+        f"1. Clone the repo: `gh repo clone {repo}`\n"
+        f"2. `cd tg-ai-assistant`\n"
+        f"3. Install Railway CLI if missing: `npm i -g @railway/cli`\n"
+        f"4. `railway login` (browser will open)\n"
+        f"5. `railway init` — create a new project called tg-ai-assistant\n"
+        f"6. Add MongoDB: `railway add --plugin mongodb`\n"
+        f"7. Set required env vars (ask me for the values one by one):\n"
+        f"   BOT_TOKEN, ANTHROPIC_API_KEY, TICKTICK_MCP_URL, MCP_SECRET\n"
+        f"8. `railway up` — deploy\n"
+        f"9. Verify the bot is online by sending /start to it on Telegram\n\n"
+        f"Ask the user for each value you don't know. Do not invent secrets."
+    )
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    s = get_settings()
+    if await _is_owner(message.from_user.id if message.from_user else None):
+        await message.answer(
+            "👁 Большой Брат на связи.\n\n"
+            "Я извлекаю задачи и договорённости из переписки — лички и групп — и "
+            "завожу их в TickTick. Уведомлений не шлю: задачи просто появляются. "
+            "Я всё вижу.\n\n"
+            "Через меню ниже можно привязать этот чат к проекту.",
+            reply_markup=_main_menu(),
+        )
+        return
+
+    # Non-owner: start onboarding flow.
+    if not s.github_token or not s.github_repo:
+        await message.answer(
+            "👋 Привет! Этот бот можно развернуть у себя.\n\n"
+            "Онбординг пока не настроен владельцем — напиши ему напрямую."
+        )
+        return
+
+    await state.set_state(Onboarding.waiting_github)
     await message.answer(
-        "👁 Большой Брат на связи.\n\n"
-        "Я извлекаю задачи и договорённости из переписки — лички и групп — и "
-        "завожу их в TickTick. Уведомлений не шлю: задачи просто появляются. "
-        "Я всё вижу.\n\n"
-        "Через меню ниже можно привязать этот чат к проекту.",
-        reply_markup=_main_menu(),
+        "👋 Привет! Хочешь поставить себе такого же бота?\n\n"
+        "Он будет работать только на тебя — твои данные у тебя, я их не вижу.\n\n"
+        "Для начала: напиши свой *GitHub username* (он нужен чтобы дать тебе доступ к репозиторию).",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(Onboarding.waiting_github)
+async def onboarding_github(message: Message, state: FSMContext) -> None:
+    s = get_settings()
+    username = (message.text or "").strip().lstrip("@")
+    if not username or " " in username:
+        await message.answer("Это не похоже на GitHub username. Попробуй ещё раз:")
+        return
+
+    await message.answer(f"⏳ Добавляю @{username} в репозиторий...")
+    try:
+        await gh.add_collaborator(s.github_token, s.github_repo, username)
+    except Exception:
+        logger.exception("GitHub invite failed for %s", username)
+        await message.answer(
+            "❌ Не удалось отправить приглашение. Проверь username и попробуй позже."
+        )
+        return
+
+    await state.clear()
+
+    prompt = _deploy_prompt(s.github_repo)
+    await message.answer(
+        f"✅ Приглашение отправлено на GitHub — прими его по email.\n\n"
+        f"Дальше: открой *Claude Code* на маке и вставь вот этот промпт:\n\n"
+        f"```\n{prompt}\n```\n\n"
+        f"Claude Code сам пройдёт все шаги деплоя. Если застрянешь — пиши сюда.",
+        parse_mode="Markdown",
     )
 
 
