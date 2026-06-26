@@ -345,13 +345,43 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await state.set_state(Onboarding.waiting_github)
     await message.answer(
         "👋 Привет! Хочешь поставить себе такого же бота?\n\n"
         "Он будет работать только на тебя — твои данные у тебя, я их не вижу.\n\n"
-        "Для начала: напиши свой *GitHub username* (он нужен чтобы дать тебе доступ к репозиторию).",
-        parse_mode="Markdown",
+        "Есть ли у тебя аккаунт на GitHub?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, есть", callback_data="ob:has_github"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="ob:no_github"),
+            ]
+        ]),
     )
+
+
+@router.callback_query(F.data == "ob:no_github")
+async def onboarding_no_github(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            "Нужно зарегистрироваться на GitHub — это бесплатно и займёт 2 минуты:\n\n"
+            "1. Зайди на [github.com](https://github.com) → *Sign up*\n"
+            "2. Придумай username (он понадобится на следующем шаге)\n"
+            "3. Вернись сюда и нажми /start",
+            parse_mode="Markdown",
+        )
+
+
+@router.callback_query(F.data == "ob:has_github")
+async def onboarding_has_github(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(Onboarding.waiting_github)
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            "Отлично! Напиши свой *GitHub username* (то что после github.com/...)",
+            parse_mode="Markdown",
+        )
 
 
 @router.message(Onboarding.waiting_github)
