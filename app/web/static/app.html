@@ -46,17 +46,117 @@
       position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
       background: var(--accent); color: var(--accent-text); padding: 8px 16px;
       border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s;
-      pointer-events: none;
+      pointer-events: none; z-index: 200;
     }
     #toast.show { opacity: 1; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab {
+      flex: 1; padding: 10px; border: none; border-radius: 10px;
+      font-size: 15px; font-weight: 600; cursor: pointer;
+      background: var(--card); color: var(--hint);
+    }
+    .tab.active { background: var(--accent); color: var(--accent-text); }
+
+    /* Settings */
+    .settings-card {
+      background: var(--card); border-radius: 14px;
+      padding: 12px; margin-bottom: 12px;
+    }
+    .settings-card .card-title {
+      font-weight: 700; font-size: 15px; margin-bottom: 10px;
+    }
+    .field-label {
+      font-size: 12px; color: var(--hint); margin: 8px 0 3px;
+    }
+    textarea {
+      width: 100%; padding: 8px 10px; border-radius: 9px;
+      border: 1px solid transparent; background: var(--bg);
+      color: var(--text); font-size: 14px; font-family: inherit;
+      resize: none; overflow: hidden; min-height: 40px;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+    .bulk-btn {
+      width: 100%; margin-top: 10px; padding: 10px;
+      border: none; border-radius: 10px;
+      background: var(--bg); color: var(--accent);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+
+    /* Overlay / bottom sheet */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.5);
+      display: flex; align-items: flex-end; z-index: 100;
+    }
+    .overlay.hidden { display: none; }
+    .sheet {
+      background: var(--bg); border-radius: 20px 20px 0 0;
+      padding: 16px 12px 32px; width: 100%; max-height: 80vh; overflow-y: auto;
+    }
+    .sheet-title { font-weight: 700; font-size: 16px; margin-bottom: 10px; }
+    .quick-sel { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+    .quick-btn {
+      padding: 6px 12px; border: none; border-radius: 8px;
+      background: var(--card); color: var(--text); font-size: 13px; cursor: pointer;
+    }
+    .chat-row-check {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 4px; border-bottom: 1px solid var(--card); cursor: pointer;
+    }
+    .check-box {
+      width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--hint);
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    }
+    .check-box.checked { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .apply-btn {
+      width: 100%; margin-top: 12px; padding: 12px;
+      border: none; border-radius: 11px; background: var(--accent); color: var(--accent-text);
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .close-btn {
+      width: 100%; margin-top: 8px; padding: 10px;
+      border: none; border-radius: 11px; background: var(--card); color: var(--hint);
+      font-size: 14px; cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <h1>Чаты → проекты TickTick</h1>
-  <div class="sub">Выбери проект для каждого чата. Задачи из чата будут попадать в него.</div>
-  <button id="addBtn">➕ Добавить бота в группу</button>
-  <div id="content"><div class="empty">Загрузка…</div></div>
+  <div class="tabs">
+    <button class="tab active" id="tabChats" onclick="switchTab('chats')">📋 Чаты</button>
+    <button class="tab" id="tabSettings" onclick="switchTab('settings')">⚙️ Настройки</button>
+  </div>
+
+  <!-- Chats tab -->
+  <div id="paneChats">
+    <h1>Чаты → проекты TickTick</h1>
+    <div class="sub">Выбери проект для каждого чата. Задачи из чата будут попадать в него.</div>
+    <button id="addBtn">➕ Добавить бота в группу</button>
+    <div id="content"><div class="empty">Загрузка…</div></div>
+  </div>
+
+  <!-- Settings tab -->
+  <div id="paneSettings" style="display:none">
+    <div id="settingsContent"><div class="empty">Загрузка…</div></div>
+  </div>
+
   <div id="toast"></div>
+
+  <!-- Bulk apply overlay -->
+  <div class="overlay hidden" id="bulkOverlay">
+    <div class="sheet">
+      <div class="sheet-title" id="bulkTitle">Применить настройки к:</div>
+      <div class="quick-sel">
+        <button class="quick-btn" onclick="bulkSelectAll()">Все</button>
+        <button class="quick-btn" onclick="bulkSelectKind('dm')">Все лички</button>
+        <button class="quick-btn" onclick="bulkSelectKind('group')">Все группы</button>
+        <button class="quick-btn" onclick="bulkSelectNone()">Очистить</button>
+      </div>
+      <div id="bulkList"></div>
+      <button class="apply-btn" id="bulkApplyBtn" onclick="doBulkApply()">📤 Применить к выбранным (0)</button>
+      <button class="close-btn" onclick="closeBulkOverlay()">✕ Закрыть</button>
+    </div>
+  </div>
 
   <script>
     const tg = window.Telegram?.WebApp;
@@ -67,6 +167,20 @@
     const $content = document.getElementById("content");
     const $toast = document.getElementById("toast");
     let toastTimer;
+    let allChats = [];
+    let settingsLoaded = false;
+    let bulkSourceId = "__global__";
+    let bulkSourceTitle = "Глобальные";
+
+    const FIELDS = [
+      { key: "who", label: "👤 Кто этот человек / о чём чат", placeholder: "Напр.: деловой партнёр, вместе ведём автопарк в Лос-Анджелесе" },
+      { key: "topics", label: "💬 Что обычно обсуждаете", placeholder: "Напр.: закупки, платежи, вэны, ремонт, планы поездок" },
+      { key: "task_side", label: "🎯 Кому ставятся задачи", placeholder: "Напр.: задачи в основном мне, он больше информирует" },
+      { key: "importance", label: "⭐ Когда задача важная, а когда нет", placeholder: "Напр.: важны только задачи с деньгами или дедлайном; бытовые «надо бы» — не важны" },
+      { key: "people", label: "👥 Кто ещё участвует (имена, роли)", placeholder: "Напр.: Коля — прораб, Артём — водитель, Оскар — финансы" },
+      { key: "filter_rules", label: "🔍 Как понять, задача это или нет", placeholder: "Напр.: любые упоминания денег и дат — задача, даже если сказано вскользь" },
+      { key: "extract_rules", label: "✍️ Как вытаскивать задачи", placeholder: "Напр.: всегда фиксируй сумму; дедлайн считай жёстким, даже если «наверное»" },
+    ];
 
     function toast(msg) {
       $toast.textContent = msg;
@@ -75,16 +189,32 @@
       toastTimer = setTimeout(() => $toast.classList.remove("show"), 1500);
     }
 
-    async function api(path, body) {
+    async function api(path, body, method) {
+      const isGet = (method || (body === undefined ? "GET" : "POST")) === "GET";
       const res = await fetch(path, {
-        method: "POST",
+        method: isGet ? "GET" : "POST",
         headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": INIT },
-        body: JSON.stringify(body || {}),
+        ...(isGet ? {} : { body: JSON.stringify(body || {}) }),
       });
       if (!res.ok) throw new Error((await res.text()) || res.status);
       return res.json();
     }
 
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    // --- Tab switching ---
+    function switchTab(tab) {
+      document.getElementById("tabChats").classList.toggle("active", tab === "chats");
+      document.getElementById("tabSettings").classList.toggle("active", tab === "settings");
+      document.getElementById("paneChats").style.display = tab === "chats" ? "" : "none";
+      document.getElementById("paneSettings").style.display = tab === "settings" ? "" : "none";
+      if (tab === "settings" && !settingsLoaded) loadSettings();
+    }
+
+    // --- Chats tab ---
     function optionList(projects, selectedId) {
       const none = `<option value="">— не привязано —</option>`;
       const opts = projects.map(p =>
@@ -99,11 +229,6 @@
         `<option value="${s.id}" ${s.id === selectedId ? "selected" : ""}>${esc(s.name)}</option>`
       ).join("");
       return none + opts;
-    }
-
-    function esc(s) {
-      return String(s).replace(/[&<>"']/g, c =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
 
     function render(data) {
@@ -143,7 +268,6 @@
 
         function showSect(v) { selS.style.display = v ? "block" : "none"; }
 
-        // Load a project's sections into the second dropdown. Hidden if none.
         async function loadSections(projectId, selectedSectionId) {
           selS.innerHTML = `<option value="">— загрузка разделов… —</option>`;
           showSect(true);
@@ -205,17 +329,224 @@
       if (!botUsername) return;
       btn.style.display = "block";
       btn.addEventListener("click", () => {
-        // Telegram's native "add to group" chooser — shows the user's groups
-        // and adds the bot to the picked one (bots can't self-join or list groups).
         const link = `https://t.me/${botUsername}?startgroup=true`;
         if (tg?.openTelegramLink) tg.openTelegramLink(link);
         else window.open(link, "_blank");
       });
     }
 
+    // --- Settings tab ---
+    function autoResize(ta) {
+      ta.style.height = "auto";
+      ta.style.height = ta.scrollHeight + "px";
+    }
+
+    function buildSettingsCard(chatId, title, doc) {
+      const card = document.createElement("div");
+      card.className = "settings-card";
+      card.dataset.chatId = chatId;
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "card-title";
+      titleEl.textContent = title;
+      card.appendChild(titleEl);
+
+      for (const f of FIELDS) {
+        const lbl = document.createElement("div");
+        lbl.className = "field-label";
+        lbl.textContent = f.label;
+        card.appendChild(lbl);
+
+        const ta = document.createElement("textarea");
+        ta.rows = 2;
+        ta.placeholder = f.placeholder;
+        ta.value = doc[f.key] || "";
+        ta.dataset.field = f.key;
+        card.appendChild(ta);
+
+        ta.addEventListener("input", () => autoResize(ta));
+        ta.addEventListener("blur", async () => {
+          try {
+            await api("/api/settings", { chatId, [f.key]: ta.value });
+            toast("Сохранено ✓");
+          } catch (e) {
+            toast("Ошибка: " + e.message);
+          }
+        });
+
+        // initial resize
+        setTimeout(() => autoResize(ta), 0);
+      }
+
+      const bulkBtn = document.createElement("button");
+      bulkBtn.className = "bulk-btn";
+      bulkBtn.textContent = "📤 Применить к нескольким чатам";
+      bulkBtn.onclick = () => openBulkOverlay(chatId, title);
+      card.appendChild(bulkBtn);
+
+      return card;
+    }
+
+    async function loadSettings() {
+      settingsLoaded = true;
+      const $sc = document.getElementById("settingsContent");
+      $sc.innerHTML = '<div class="empty">Загрузка…</div>';
+      try {
+        // Load global settings
+        const globalDoc = await api("/api/settings?chatId=__global__", undefined, "GET");
+        $sc.innerHTML = "";
+
+        const globalLbl = document.createElement("div");
+        globalLbl.className = "group-label";
+        globalLbl.textContent = "🌐 Глобальные настройки";
+        $sc.appendChild(globalLbl);
+        $sc.appendChild(buildSettingsCard("__global__", "🌐 Глобальные", globalDoc));
+
+        // Groups
+        const groups = allChats.filter(c => c.kind === "group");
+        const dms = allChats.filter(c => c.kind === "dm");
+
+        if (groups.length) {
+          const lbl = document.createElement("div");
+          lbl.className = "group-label";
+          lbl.textContent = "Группы";
+          $sc.appendChild(lbl);
+          for (const c of groups) {
+            const doc = await api(`/api/settings?chatId=${encodeURIComponent(c.chatId)}`, undefined, "GET");
+            $sc.appendChild(buildSettingsCard(c.chatId, c.title, doc));
+          }
+        }
+
+        if (dms.length) {
+          const lbl = document.createElement("div");
+          lbl.className = "group-label";
+          lbl.textContent = "Личные чаты";
+          $sc.appendChild(lbl);
+          for (const c of dms) {
+            const doc = await api(`/api/settings?chatId=${encodeURIComponent(c.chatId)}`, undefined, "GET");
+            $sc.appendChild(buildSettingsCard(c.chatId, c.title, doc));
+          }
+        }
+      } catch (e) {
+        $sc.innerHTML = `<div class="err">Не удалось загрузить настройки.<br>${esc(e.message)}</div>`;
+      }
+    }
+
+    // --- Bulk apply ---
+    let bulkSelected = new Set();
+
+    function openBulkOverlay(sourceId, sourceTitle) {
+      bulkSourceId = sourceId;
+      bulkSourceTitle = sourceTitle;
+      bulkSelected = new Set();
+
+      document.getElementById("bulkTitle").textContent =
+        `Применить настройки из «${sourceTitle}» к:`;
+
+      const list = document.getElementById("bulkList");
+      list.innerHTML = "";
+
+      const targets = [
+        { chatId: "__global__", title: "🌐 Глобальные", kind: "global" },
+        ...allChats,
+      ].filter(c => c.chatId !== sourceId);
+
+      for (const c of targets) {
+        const row = document.createElement("div");
+        row.className = "chat-row-check";
+        row.dataset.chatId = c.chatId;
+        row.dataset.kind = c.kind || "global";
+
+        const box = document.createElement("div");
+        box.className = "check-box";
+        box.innerHTML = "";
+
+        const nameEl = document.createElement("span");
+        nameEl.textContent = c.title;
+
+        row.appendChild(box);
+        row.appendChild(nameEl);
+
+        row.addEventListener("click", () => {
+          if (bulkSelected.has(c.chatId)) {
+            bulkSelected.delete(c.chatId);
+            box.classList.remove("checked");
+            box.innerHTML = "";
+          } else {
+            bulkSelected.add(c.chatId);
+            box.classList.add("checked");
+            box.innerHTML = "✓";
+          }
+          updateBulkCount();
+        });
+
+        list.appendChild(row);
+      }
+
+      updateBulkCount();
+      document.getElementById("bulkOverlay").classList.remove("hidden");
+    }
+
+    function updateBulkCount() {
+      document.getElementById("bulkApplyBtn").textContent =
+        `📤 Применить к выбранным (${bulkSelected.size})`;
+    }
+
+    function bulkSelectAll() {
+      document.querySelectorAll("#bulkList .chat-row-check").forEach(row => {
+        bulkSelected.add(row.dataset.chatId);
+        const box = row.querySelector(".check-box");
+        box.classList.add("checked");
+        box.innerHTML = "✓";
+      });
+      updateBulkCount();
+    }
+
+    function bulkSelectKind(kind) {
+      document.querySelectorAll("#bulkList .chat-row-check").forEach(row => {
+        if (row.dataset.kind === kind) {
+          bulkSelected.add(row.dataset.chatId);
+          const box = row.querySelector(".check-box");
+          box.classList.add("checked");
+          box.innerHTML = "✓";
+        }
+      });
+      updateBulkCount();
+    }
+
+    function bulkSelectNone() {
+      bulkSelected.clear();
+      document.querySelectorAll("#bulkList .check-box").forEach(box => {
+        box.classList.remove("checked");
+        box.innerHTML = "";
+      });
+      updateBulkCount();
+    }
+
+    function closeBulkOverlay() {
+      document.getElementById("bulkOverlay").classList.add("hidden");
+    }
+
+    async function doBulkApply() {
+      if (!bulkSelected.size) { toast("Выбери хотя бы один чат"); return; }
+      try {
+        const r = await api("/api/settings/bulk", {
+          sourceId: bulkSourceId,
+          targetIds: [...bulkSelected],
+        });
+        toast(`Применено к ${r.count} чатам ✓`);
+        closeBulkOverlay();
+        tg?.HapticFeedback?.notificationOccurred("success");
+      } catch (e) {
+        toast("Ошибка: " + e.message);
+      }
+    }
+
+    // --- Init ---
     (async () => {
       try {
         const data = await api("/api/data");
+        allChats = data.chats || [];
         wireAddButton(data.botUsername);
         render(data);
       } catch (e) {

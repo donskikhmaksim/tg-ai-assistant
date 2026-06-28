@@ -226,6 +226,40 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
+_SETTINGS_FIELDS = ("who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules")
+
+
+async def api_get_settings(request: web.Request) -> web.Response:
+    """GET /api/settings?chatId=... — вернуть настройки чата (или __global__)"""
+    await _require_owner(request)
+    chat_id = request.rel_url.query.get("chatId", "__global__")
+    doc = await repo.get_chat_settings(chat_id)
+    return web.json_response(doc)
+
+
+async def api_save_settings(request: web.Request) -> web.Response:
+    """POST /api/settings — сохранить поля настроек"""
+    await _require_owner(request)
+    body = await request.json()
+    chat_id = body.get("chatId", "__global__")
+    fields = {k: v for k, v in body.items() if k in _SETTINGS_FIELDS}
+    await repo.update_chat_settings(chat_id, fields)
+    return web.json_response({"ok": True})
+
+
+async def api_bulk_settings(request: web.Request) -> web.Response:
+    """POST /api/settings/bulk — скопировать настройки из одного чата в несколько"""
+    await _require_owner(request)
+    body = await request.json()
+    source_id = body.get("sourceId", "__global__")
+    target_ids = body.get("targetIds", [])
+    source_doc = await repo.get_chat_settings(source_id)
+    fields = {k: v for k, v in source_doc.items() if k in _SETTINGS_FIELDS and v}
+    for tid in target_ids:
+        await repo.update_chat_settings(tid, fields)
+    return web.json_response({"ok": True, "count": len(target_ids)})
+
+
 def build_app(bot: Any) -> web.Application:
     app = web.Application()
     app["bot"] = bot
@@ -239,6 +273,9 @@ def build_app(bot: Any) -> web.Application:
             web.post("/api/sections", api_sections),
             web.post("/api/bind", api_bind),
             web.post("/api/unbind", api_unbind),
+            web.get("/api/settings", api_get_settings),
+            web.post("/api/settings", api_save_settings),
+            web.post("/api/settings/bulk", api_bulk_settings),
         ]
     )
     return app
