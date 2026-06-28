@@ -42,13 +42,19 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-def _build_system(chat_context: str = "", filter_rules: str | None = None) -> str:
+def _build_system(
+    chat_context: str = "",
+    filter_rules: str | None = None,
+    importance: str | None = None,
+) -> str:
     """Compose the final system prompt: default + optional context + optional rules."""
     parts = [_SYSTEM]
     if chat_context:
         parts.append(chat_context)
     if filter_rules:
         parts.append(f"Дополнительные правила для этого чата:\n{filter_rules}")
+    if importance:
+        parts.append(f"Критерий важности задачи:\n{importance}")
     return "\n\n".join(parts)
 
 
@@ -56,9 +62,10 @@ async def has_task(
     window_text: str,
     chat_context: str = "",
     filter_rules: str | None = None,
+    importance: str | None = None,
 ) -> bool:
     s = get_settings()
-    system = _build_system(chat_context, filter_rules)
+    system = _build_system(chat_context, filter_rules, importance)
     try:
         resp = await _get_client().chat.completions.create(
             model=s.qwen_model,

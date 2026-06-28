@@ -42,6 +42,11 @@ def _build_chat_context(doc: dict) -> str:
     return "--- Контекст этого чата ---\n" + "\n".join(lines) + "\n---"
 
 
+def _merge_settings(global_doc: dict, chat_doc: dict) -> dict:
+    """Merge global defaults with per-chat settings (per-chat wins on non-empty values)."""
+    return {**global_doc, **{k: v for k, v in chat_doc.items() if v}}
+
+
 async def run_batch() -> None:
     s = get_settings()
     chats = await repo.get_dirty_chats(s.quiet_minutes, s.max_dirty_minutes)
@@ -71,14 +76,24 @@ async def process_chat(chat_id: str) -> None:
     # Archive embeddings for retrieval (dedup'd; permanent, survives raw TTL).
     await retrieval.index_messages(chat_id, messages)
 
-    # Load per-chat settings (context fields + filter/extract rules).
-    settings_doc = await repo.get_chat_settings(chat_id)
+    # Load settings: merge global defaults with per-chat overrides.
+    global_doc = await repo.get_global_settings()
+    per_chat_doc = await repo.get_chat_settings(chat_id)
+    settings_doc = _merge_settings(global_doc, per_chat_doc)
+
     chat_context = _build_chat_context(settings_doc)
     filter_rules = settings_doc.get("filter_rules")
     extract_rules = settings_doc.get("extract_rules")
+    importance = settings_doc.get("importance")
+    people = settings_doc.get("people")
 
-    # Tier 1 — cheap local gate.
-    if not await qwen.has_task(window_text, chat_context=chat_context, filter_rules=filter_rules):
+    # Tier 1 — cheap local gate (importance injected here too).
+    if not await qwen.has_task(
+        window_text,
+        chat_context=chat_context,
+        filter_rules=filter_rules,
+        importance=importance,
+    ):
         logger.info("Chat %s: Qwen says no task", chat_id)
         await repo.mark_processed(chat_id)
         return
@@ -92,7 +107,10 @@ async def process_chat(chat_id: str) -> None:
     open_tasks = await repo.get_open_tasks(chat_id)
     result = await claude.extract(
         window_text, summary, open_tasks, retrieved,
-        chat_context=chat_context, extract_rules=extract_rules,
+        chat_context=chat_context,
+        extract_rules=extract_rules,
+        importance=importance,
+        people=people,
     )
 
     # Memory first: persist the refreshed summary before raw expires.

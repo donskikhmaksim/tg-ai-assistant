@@ -11,6 +11,7 @@ from aiogram.types import MenuButtonWebApp, WebAppInfo
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
+from .repositories import init_global_defaults
 from .telegram.bot import build_bot, build_dispatcher
 from .web.server import start_web
 
@@ -27,6 +28,7 @@ async def main() -> None:
         raise SystemExit("BOT_TOKEN is not set")
 
     await init_db()
+    await init_global_defaults()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(

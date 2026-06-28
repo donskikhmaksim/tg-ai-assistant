@@ -53,6 +53,7 @@ class Onboarding(StatesGroup):
 
 class ChatSettings(StatesGroup):
     awaiting_value = State()
+    bulk_select = State()
 
 
 BTN_BIND = "🔗 Привязать проект"
@@ -60,6 +61,7 @@ BTN_LIST = "📋 Мои привязки"
 BTN_UNBIND = "❌ Отвязать"
 BTN_APP = "🗂 Открыть мини-апку"
 BTN_SETTINGS = "⚙️ Настройки чата"
+BTN_GLOBAL = "🌐 Глобальные"
 
 # Group join greeting — the bot's persona is "Большой Брат" (Big Brother).
 def _welcome_text(bot_name: str) -> str:
@@ -78,7 +80,7 @@ def _main_menu() -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=BTN_BIND)],
         [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_UNBIND)],
-        [KeyboardButton(text=BTN_SETTINGS)],
+        [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_GLOBAL)],
     ]
     # The Mini App (Phase 2) — a one-tap WebApp for managing all bindings at once.
     url = get_settings().webapp_url
@@ -485,6 +487,16 @@ _CS_FIELDS: dict[str, tuple[str, str, str]] = {
         "Напр.: всегда фиксируй сумму если упомянута; дедлайн считай жёстким даже если «наверное»; задачи на меня помечай who=me",
         "✍️",
     ),
+    "importance": (
+        "Когда задача важная, а когда нет",
+        "Напр.: важны только задачи с деньгами или дедлайном; бытовые «надо бы» — не важны",
+        "⭐",
+    ),
+    "people": (
+        "Кто ещё участвует (имена, роли)",
+        "Напр.: Коля — прораб, Артём — водитель, Оскар — финансы",
+        "👥",
+    ),
 }
 
 
@@ -507,7 +519,11 @@ async def _cs_chats_keyboard() -> InlineKeyboardMarkup:
 
 
 def _cs_card_text(chat_id: str, title: str, settings_doc: dict) -> str:
-    lines = [f"⚙️ Настройки · {title}\n"]
+    if chat_id == "__global__":
+        header = "🌐 Глобальные настройки (применяются ко всем чатам как база)\n"
+    else:
+        header = f"⚙️ Настройки · {title}\n"
+    lines = [header]
     for field, (label, _, emoji) in _CS_FIELDS.items():
         value = settings_doc.get(field)
         display = f"→ {value}" if value else "→ не задано"
@@ -523,7 +539,9 @@ def _cs_card_keyboard(chat_id: str, settings_doc: dict) -> InlineKeyboardMarkup:
         if value:
             btn_row.append(InlineKeyboardButton(text="🔄", callback_data=f"cs_reset:{chat_id}:{field}"))
         rows.append(btn_row)
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="cs_back_chats")])
+    rows.append([InlineKeyboardButton(text="📤 Применить к нескольким чатам", callback_data=f"cs_bulk:{chat_id}")])
+    back_cb = "cs_back_global" if chat_id == "__global__" else "cs_back_chats"
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=back_cb)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -645,3 +663,220 @@ async def cs_reset_field(callback: CallbackQuery) -> None:
     msg = callback.message
     if isinstance(msg, Message):
         await msg.edit_text(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+
+@router.message(F.text == BTN_GLOBAL)
+async def cmd_global_settings(message: Message) -> None:
+    if not await _is_owner(message.from_user.id if message.from_user else None):
+        return
+    settings_doc = await repo.get_global_settings()
+    text = _cs_card_text("__global__", "", settings_doc)
+    kb = _cs_card_keyboard("__global__", settings_doc)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "cs_back_global")
+async def cs_back_global(callback: CallbackQuery) -> None:
+    await callback.answer()
+    settings_doc = await repo.get_global_settings()
+    text = _cs_card_text("__global__", "", settings_doc)
+    kb = _cs_card_keyboard("__global__", settings_doc)
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Bulk Apply
+# ---------------------------------------------------------------------------
+
+async def _bulk_chats_keyboard(source_chat_id: str, selected: list[str]) -> InlineKeyboardMarkup:
+    """Build the bulk-select keyboard with checkboxes."""
+    from ..db import get_db as _get_db
+    db = _get_db()
+    cursor = db.chat_state.find({}, {"chatId": 1, "title": 1}).sort("lastMessageAt", -1).limit(50)
+    chats = [d async for d in cursor]
+
+    rows = []
+    for d in chats:
+        cid = d["chatId"]
+        title = d.get("title") or cid
+        chat_type = "группа" if cid.startswith("group_") else "личка"
+        check = "☑️" if cid in selected else "☐"
+        rows.append([InlineKeyboardButton(
+            text=f"{check} {title}   {chat_type}",
+            callback_data=f"cs_toggle:{source_chat_id}:{cid}",
+        )])
+
+    rows.append([
+        InlineKeyboardButton(text="✅ Все", callback_data=f"cs_select_all:{source_chat_id}"),
+        InlineKeyboardButton(text="👤 Лички", callback_data=f"cs_select_dms:{source_chat_id}"),
+        InlineKeyboardButton(text="👥 Группы", callback_data=f"cs_select_groups:{source_chat_id}"),
+        InlineKeyboardButton(text="❌ Очистить", callback_data=f"cs_clear_sel:{source_chat_id}"),
+    ])
+    rows.append([InlineKeyboardButton(text="📤 Применить к выбранным", callback_data=f"cs_apply_bulk:{source_chat_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"cs_chat:{source_chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _all_chat_ids() -> list[str]:
+    from ..db import get_db as _get_db
+    db = _get_db()
+    cursor = db.chat_state.find({}, {"chatId": 1})
+    return [d["chatId"] async for d in cursor]
+
+
+@router.callback_query(F.data.startswith("cs_bulk:"))
+async def cs_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    await state.set_state(ChatSettings.bulk_select)
+    await state.update_data(source_chat_id=source_chat_id, selected=[])
+
+    source_title = (
+        "Глобальные" if source_chat_id == "__global__"
+        else await repo.get_chat_title(source_chat_id)
+    )
+    kb = await _bulk_chats_keyboard(source_chat_id, [])
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            f"Выбери чаты для применения настроек из «{source_title}»:",
+            reply_markup=kb,
+        )
+
+
+@router.callback_query(F.data.startswith("cs_toggle:"))
+async def cs_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    _, source_chat_id, target_chat_id = callback.data.split(":", 2)
+    data = await state.get_data()
+    selected: list[str] = list(data.get("selected", []))
+    if target_chat_id in selected:
+        selected.remove(target_chat_id)
+    else:
+        selected.append(target_chat_id)
+    await state.update_data(selected=selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            logger.debug("edit_reply_markup failed", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("cs_select_all:"))
+async def cs_select_all(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    all_ids = await _all_chat_ids()
+    await state.update_data(selected=all_ids)
+    kb = await _bulk_chats_keyboard(source_chat_id, all_ids)
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            logger.debug("edit_reply_markup failed", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("cs_select_dms:"))
+async def cs_select_dms(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    all_ids = await _all_chat_ids()
+    dms = [cid for cid in all_ids if cid.startswith("user_")]
+    data = await state.get_data()
+    selected = list(set(list(data.get("selected", [])) + dms))
+    await state.update_data(selected=selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            logger.debug("edit_reply_markup failed", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("cs_select_groups:"))
+async def cs_select_groups(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    all_ids = await _all_chat_ids()
+    groups = [cid for cid in all_ids if cid.startswith("group_")]
+    data = await state.get_data()
+    selected = list(set(list(data.get("selected", [])) + groups))
+    await state.update_data(selected=selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            logger.debug("edit_reply_markup failed", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("cs_clear_sel:"))
+async def cs_clear_sel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    await state.update_data(selected=[])
+    kb = await _bulk_chats_keyboard(source_chat_id, [])
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            logger.debug("edit_reply_markup failed", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("cs_apply_bulk:"))
+async def cs_apply_bulk(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    source_chat_id = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected: list[str] = data.get("selected", [])
+    if not selected:
+        await callback.answer("Не выбрано ни одного чата.", show_alert=True)
+        return
+
+    # Copy settings from source to all selected chats
+    source_doc = (
+        await repo.get_global_settings()
+        if source_chat_id == "__global__"
+        else await repo.get_chat_settings(source_chat_id)
+    )
+    # Only copy the 7 known fields
+    fields_to_copy = {
+        k: v for k, v in source_doc.items()
+        if k in _CS_FIELDS and v
+    }
+    for target_id in selected:
+        if target_id == source_chat_id:
+            continue
+        if fields_to_copy:
+            await repo.update_chat_settings(target_id, fields_to_copy)
+
+    await state.clear()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(f"✅ Применено к {len(selected)} чатам.")

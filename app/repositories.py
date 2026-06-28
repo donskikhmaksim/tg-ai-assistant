@@ -297,8 +297,12 @@ async def get_bot_state(key: str) -> Any:
 #   who           str | None  — who this person is / what the group is about
 #   topics        str | None  — what is usually discussed
 #   task_side     str | None  — who tasks are assigned to
-#   filter_rules  str | None  — Qwen: additional rules for detecting tasks
+#   filter_rules  str | None  — Qwen+Claude: additional rules for detecting tasks
 #   extract_rules str | None  — Claude: additional rules for extracting tasks
+#   importance    str | None  — Qwen+Claude: what makes a task important vs not
+#   people        str | None  — Claude only: names/roles reference for this chat
+#
+# Special chatId "__global__" holds defaults applied to all chats (per-chat overrides).
 # ---------------------------------------------------------------------------
 
 async def get_chat_settings(chat_id: str) -> dict[str, Any]:
@@ -308,12 +312,49 @@ async def get_chat_settings(chat_id: str) -> dict[str, Any]:
     return doc or {}
 
 
+async def get_global_settings() -> dict[str, Any]:
+    """Returns the global (default) settings document, or {} if none."""
+    return await get_chat_settings("__global__")
+
+
+async def update_global_settings(fields: dict[str, Any]) -> None:
+    """Upsert the given fields into the global settings document."""
+    await update_chat_settings("__global__", fields)
+
+
 async def update_chat_settings(chat_id: str, fields: dict[str, Any]) -> None:
     """Upsert the given fields into the chat settings document."""
     db = get_db()
     await db.chat_settings.update_one(
         {"chatId": chat_id},
         {"$set": {"chatId": chat_id, **fields}},
+        upsert=True,
+    )
+
+
+_DEFAULT_GLOBAL_FILTER_RULES = (
+    "Оцени не только есть ли задача, но и стоит ли она внимания.\n"
+    "Отклоняй (has_task: false) если задача явно незначительная в данном контексте: "
+    "бытовая мелочь без дедлайна, абстрактные «когда-нибудь», риторические обещания.\n"
+    "Принимай (has_task: true) если: есть конкретное действие + дедлайн/деньги/имя ответственного."
+)
+
+
+async def init_global_defaults(db: Any | None = None) -> None:
+    """Pre-fill global settings with smart defaults if not already set.
+
+    Called once at startup. The user can override any field via the UI.
+    """
+    _db = db or get_db()
+    doc = await _db.chat_settings.find_one({"chatId": "__global__"})
+    if doc and doc.get("filter_rules"):
+        return  # Already configured — don't overwrite user's settings.
+    await _db.chat_settings.update_one(
+        {"chatId": "__global__"},
+        {"$setOnInsert": {
+            "chatId": "__global__",
+            "filter_rules": _DEFAULT_GLOBAL_FILTER_RULES,
+        }},
         upsert=True,
     )
 

@@ -173,13 +173,22 @@ def _build_user_prompt(
     )
 
 
-def _build_system(chat_context: str = "", extract_rules: str | None = None) -> str:
+def _build_system(
+    chat_context: str = "",
+    extract_rules: str | None = None,
+    importance: str | None = None,
+    people: str | None = None,
+) -> str:
     """Compose the final system prompt: default + optional context + optional rules."""
     parts = [SYSTEM_PROMPT]
     if chat_context:
         parts.append(chat_context)
     if extract_rules:
         parts.append(f"Дополнительные правила извлечения для этого чата:\n{extract_rules}")
+    if importance:
+        parts.append(f"Критерий важности задачи:\n{importance}")
+    if people:
+        parts.append(f"Справочник участников этого чата:\n{people}")
     return "\n\n".join(parts)
 
 
@@ -190,9 +199,11 @@ async def extract(
     retrieved: list[str] | None = None,
     chat_context: str = "",
     extract_rules: str | None = None,
+    importance: str | None = None,
+    people: str | None = None,
 ) -> dict[str, Any]:
     s = get_settings()
-    system = _build_system(chat_context, extract_rules)
+    system = _build_system(chat_context, extract_rules, importance, people)
     resp = await _get_client().messages.create(
         model=s.anthropic_model,
         max_tokens=8000,
