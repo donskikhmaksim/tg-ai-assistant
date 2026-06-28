@@ -16,7 +16,7 @@ from ..config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = (
+TIER1_DEFAULT_SYSTEM = (
     "You are a HIGH-RECALL triage filter before an expensive extractor. You read "
     "a fragment of a chat conversation (Russian or English) and decide whether it "
     "MIGHT contain any actionable item — a task, to-do, promise, commitment, "
@@ -29,6 +29,8 @@ _SYSTEM = (
     "{\"has_task\": false}. No prose."
 )
 
+_SYSTEM = TIER1_DEFAULT_SYSTEM
+
 _client: AsyncOpenAI | None = None
 
 
@@ -40,13 +42,14 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def has_task(window_text: str) -> bool:
+async def has_task(window_text: str, system_override: str | None = None) -> bool:
     s = get_settings()
+    system = system_override or _SYSTEM
     try:
         resp = await _get_client().chat.completions.create(
             model=s.qwen_model,
             messages=[
-                {"role": "system", "content": _SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": window_text},
             ],
             temperature=0,

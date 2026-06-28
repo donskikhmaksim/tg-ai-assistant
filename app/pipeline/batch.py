@@ -57,8 +57,13 @@ async def process_chat(chat_id: str) -> None:
     # Archive embeddings for retrieval (dedup'd; permanent, survives raw TTL).
     await retrieval.index_messages(chat_id, messages)
 
+    # Load per-chat prompt overrides.
+    settings_doc = await repo.get_chat_settings(chat_id)
+    tier1_prompt = settings_doc.get("tier1_prompt")
+    tier2_prompt = settings_doc.get("tier2_prompt")
+
     # Tier 1 — cheap local gate.
-    if not await qwen.has_task(window_text):
+    if not await qwen.has_task(window_text, system_override=tier1_prompt):
         logger.info("Chat %s: Qwen says no task", chat_id)
         await repo.mark_processed(chat_id)
         return
@@ -70,7 +75,7 @@ async def process_chat(chat_id: str) -> None:
     # Tier 2 — Claude with long-term memory + retrieved context.
     summary = await repo.get_summary(chat_id)
     open_tasks = await repo.get_open_tasks(chat_id)
-    result = await claude.extract(window_text, summary, open_tasks, retrieved)
+    result = await claude.extract(window_text, summary, open_tasks, retrieved, system_override=tier2_prompt)
 
     # Memory first: persist the refreshed summary before raw expires.
     new_summary = result.get("updated_summary")

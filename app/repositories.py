@@ -287,3 +287,32 @@ async def get_bot_state(key: str) -> Any:
     db = get_db()
     doc = await db.bot_state.find_one({"key": key})
     return doc["value"] if doc else None
+
+
+# ---------------------------------------------------------------------------
+# chat_settings (per-chat LLM prompt overrides)
+# ---------------------------------------------------------------------------
+
+async def get_chat_settings(chat_id: str) -> dict[str, Any]:
+    """Returns dict with keys tier1_prompt, tier2_prompt (or absent if not set)."""
+    db = get_db()
+    doc = await db.chat_settings.find_one({"chatId": chat_id})
+    return doc or {}
+
+
+async def set_chat_prompt(chat_id: str, tier: str, prompt: str | None) -> None:
+    """Set or clear (if prompt=None) a prompt for tier ('tier1' or 'tier2')."""
+    db = get_db()
+    key = f"{tier}_prompt"
+    if prompt is None:
+        await db.chat_settings.update_one(
+            {"chatId": chat_id},
+            {"$unset": {key: ""}, "$setOnInsert": {"chatId": chat_id}},
+            upsert=True,
+        )
+    else:
+        await db.chat_settings.update_one(
+            {"chatId": chat_id},
+            {"$set": {"chatId": chat_id, key: prompt}},
+            upsert=True,
+        )

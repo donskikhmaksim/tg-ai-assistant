@@ -24,7 +24,7 @@ from ..config import get_settings
 logger = logging.getLogger(__name__)
 
 # Stable system prompt → cached. Keep it byte-identical across requests.
-SYSTEM_PROMPT = (
+TIER2_DEFAULT_SYSTEM = (
     "You extract tasks, promises, commitments and agreements from a chat "
     "conversation and maintain a running memory of the chat.\n\n"
     "The conversation is between the OWNER (messages marked `out` / who=\"me\") and "
@@ -73,6 +73,8 @@ SYSTEM_PROMPT = (
     "Be conservative: extract real commitments, not hypotheticals or small talk. "
     "Return only the structured JSON."
 )
+
+SYSTEM_PROMPT = TIER2_DEFAULT_SYSTEM
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -176,8 +178,10 @@ async def extract(
     summary: str,
     open_tasks: list[dict[str, Any]],
     retrieved: list[str] | None = None,
+    system_override: str | None = None,
 ) -> dict[str, Any]:
     s = get_settings()
+    system = system_override or SYSTEM_PROMPT
     resp = await _get_client().messages.create(
         model=s.anthropic_model,
         max_tokens=8000,
@@ -186,7 +190,7 @@ async def extract(
             "effort": s.anthropic_effort,
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
-        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[
             {"role": "user", "content": _build_user_prompt(window_text, summary, open_tasks, retrieved)}
         ],
