@@ -39,8 +39,6 @@ from .. import github as gh
 
 from .. import repositories as repo
 from ..config import get_settings
-from ..llm.qwen import TIER1_DEFAULT_SYSTEM
-from ..llm.claude import TIER2_DEFAULT_SYSTEM
 from ..ticktick.mcp_client import get_ticktick
 from .notify import group_watch_announcement
 
@@ -53,17 +51,15 @@ class Onboarding(StatesGroup):
     waiting_github = State()
 
 
-class PromptConfig(StatesGroup):
-    choose_chat = State()
-    choose_tier = State()
-    awaiting_new_prompt = State()
+class ChatSettings(StatesGroup):
+    awaiting_value = State()
 
 
 BTN_BIND = "🔗 Привязать проект"
 BTN_LIST = "📋 Мои привязки"
 BTN_UNBIND = "❌ Отвязать"
 BTN_APP = "🗂 Открыть мини-апку"
-BTN_PROMPTS = "🧠 Промпты"
+BTN_SETTINGS = "⚙️ Настройки чата"
 
 # Group join greeting — the bot's persona is "Большой Брат" (Big Brother).
 def _welcome_text(bot_name: str) -> str:
@@ -82,7 +78,7 @@ def _main_menu() -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=BTN_BIND)],
         [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_UNBIND)],
-        [KeyboardButton(text=BTN_PROMPTS)],
+        [KeyboardButton(text=BTN_SETTINGS)],
     ]
     # The Mini App (Phase 2) — a one-tap WebApp for managing all bindings at once.
     url = get_settings().webapp_url
@@ -459,10 +455,40 @@ async def unbind(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prompt config UI
+# Chat settings UI
 # ---------------------------------------------------------------------------
 
-async def _chats_keyboard() -> InlineKeyboardMarkup:
+# Field metadata: label, placeholder, emoji
+_CS_FIELDS: dict[str, tuple[str, str, str]] = {
+    "who": (
+        "Кто этот человек / о чём чат",
+        "Напр.: деловой партнёр, вместе ведём автопарк в Лос-Анджелесе",
+        "👤",
+    ),
+    "topics": (
+        "Что обычно обсуждаете",
+        "Напр.: закупки, платежи, вэны, ремонт, планы поездок",
+        "💬",
+    ),
+    "task_side": (
+        "Кому ставятся задачи",
+        "Напр.: задачи в основном мне, он больше информирует и напоминает",
+        "🎯",
+    ),
+    "filter_rules": (
+        "Как понять, задача это или нет",
+        "Напр.: любые упоминания денег и дат — это задача, даже если сказано вскользь. Не считать задачей просто вопросы без обязательства",
+        "🔍",
+    ),
+    "extract_rules": (
+        "Как именно вытаскивать задачи",
+        "Напр.: всегда фиксируй сумму если упомянута; дедлайн считай жёстким даже если «наверное»; задачи на меня помечай who=me",
+        "✍️",
+    ),
+}
+
+
+async def _cs_chats_keyboard() -> InlineKeyboardMarkup:
     """Top 20 chats sorted by last activity."""
     from ..db import get_db
     db = get_db()
@@ -470,122 +496,152 @@ async def _chats_keyboard() -> InlineKeyboardMarkup:
     chats = [d async for d in cursor]
     rows = [
         [InlineKeyboardButton(
-            text=f"{d.get('title') or d['chatId']} ({d['chatId']})",
-            callback_data=f"pr_chat:{d['chatId']}",
+            text=d.get("title") or d["chatId"],
+            callback_data=f"cs_chat:{d['chatId']}",
         )]
         for d in chats
     ]
     if not rows:
-        rows = [[InlineKeyboardButton(text="(нет чатов)", callback_data="pr_noop")]]
+        rows = [[InlineKeyboardButton(text="(нет чатов)", callback_data="cs_noop")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text == BTN_PROMPTS)
-async def cmd_prompts(message: Message) -> None:
+def _cs_card_text(chat_id: str, title: str, settings_doc: dict) -> str:
+    lines = [f"⚙️ Настройки · {title}\n"]
+    for field, (label, _, emoji) in _CS_FIELDS.items():
+        value = settings_doc.get(field)
+        display = f"→ {value}" if value else "→ не задано"
+        lines.append(f"{emoji} {label}\n{display}")
+    return "\n\n".join(lines)
+
+
+def _cs_card_keyboard(chat_id: str, settings_doc: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for field, (label, _, emoji) in _CS_FIELDS.items():
+        value = settings_doc.get(field)
+        btn_row = [InlineKeyboardButton(text=f"{emoji} ✏️", callback_data=f"cs_edit:{chat_id}:{field}")]
+        if value:
+            btn_row.append(InlineKeyboardButton(text="🔄", callback_data=f"cs_reset:{chat_id}:{field}"))
+        rows.append(btn_row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="cs_back_chats")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(F.text == BTN_SETTINGS)
+async def cmd_settings(message: Message) -> None:
     if not await _is_owner(message.from_user.id if message.from_user else None):
         return
-    kb = await _chats_keyboard()
-    await message.answer("Выбери чат для настройки промптов:", reply_markup=kb)
+    kb = await _cs_chats_keyboard()
+    await message.answer("Выбери чат для настройки:", reply_markup=kb)
 
 
-@router.callback_query(F.data == "pr_noop")
-async def pr_noop(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "cs_noop")
+async def cs_noop(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "pr_back_chats")
-async def pr_back_chats(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "cs_back_chats")
+async def cs_back_chats(callback: CallbackQuery) -> None:
     await callback.answer()
-    kb = await _chats_keyboard()
+    kb = await _cs_chats_keyboard()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text("Выбери чат для настройки промптов:", reply_markup=kb)
+        await msg.edit_text("Выбери чат для настройки:", reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("pr_chat:"))
-async def pr_pick_chat(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("cs_chat:"))
+async def cs_pick_chat(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.data:
         return
     chat_id = callback.data.split(":", 1)[1]
+    settings_doc = await repo.get_chat_settings(chat_id)
+    title = await repo.get_chat_title(chat_id)
+    text = _cs_card_text(chat_id, title, settings_doc)
+    kb = _cs_card_keyboard(chat_id, settings_doc)
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cs_edit:"))
+async def cs_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.data:
+        return
+    _, chat_id, field = callback.data.split(":", 2)
+    meta = _CS_FIELDS.get(field)
+    if not meta:
+        return
+    label, placeholder, emoji = meta
+    settings_doc = await repo.get_chat_settings(chat_id)
+    current = settings_doc.get(field)
+
+    await state.set_state(ChatSettings.awaiting_value)
+    await state.update_data(cs_chat_id=chat_id, cs_field=field)
+
+    current_line = f"Текущее: {current}" if current else "Текущее: не задано"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Tier 1 (фильтр Qwen)", callback_data=f"pr_tier:{chat_id}:tier1")],
-        [InlineKeyboardButton(text="✍️ Tier 2 (Claude извлечение)", callback_data=f"pr_tier:{chat_id}:tier2")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="pr_back_chats")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cs_cancel:{chat_id}")]
     ])
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(f"Чат `{chat_id}` — выбери тир:", reply_markup=kb)
-
-
-@router.callback_query(F.data.startswith("pr_tier:"))
-async def pr_pick_tier(callback: CallbackQuery) -> None:
-    await callback.answer()
-    if not callback.data:
-        return
-    _, chat_id, tier = callback.data.split(":", 2)
-    settings_doc = await repo.get_chat_settings(chat_id)
-    key = f"{tier}_prompt"
-    custom = settings_doc.get(key)
-    default_text = TIER1_DEFAULT_SYSTEM if tier == "tier1" else TIER2_DEFAULT_SYSTEM
-
-    if custom:
-        preview = custom[:400] + ("…" if len(custom) > 400 else "")
-        status = f"*Текущий промпт (кастомный):*\n```\n{preview}\n```"
-    else:
-        preview = default_text[:400] + ("…" if len(default_text) > 400 else "")
-        status = f"*Текущий промпт (дефолтный):*\n```\n{preview}\n```"
-
-    rows = [
-        [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"pr_edit:{chat_id}:{tier}")],
-    ]
-    if custom:
-        rows.append([InlineKeyboardButton(text="🔄 Сбросить к дефолту", callback_data=f"pr_reset:{chat_id}:{tier}")])
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"pr_chat:{chat_id}")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    msg = callback.message
-    if isinstance(msg, Message):
-        await msg.edit_text(status, reply_markup=kb, parse_mode="Markdown")
-
-
-@router.callback_query(F.data.startswith("pr_edit:"))
-async def pr_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    if not callback.data:
-        return
-    _, chat_id, tier = callback.data.split(":", 2)
-    await state.set_state(PromptConfig.awaiting_new_prompt)
-    await state.update_data(pr_chat_id=chat_id, pr_tier=tier)
-    msg = callback.message
-    if isinstance(msg, Message):
         await msg.answer(
-            f"Отправь новый промпт для чата `{chat_id}` (тир: {tier}).\n"
-            "Следующее сообщение будет сохранено как промпт."
+            f"{emoji} {label}\n\n"
+            f"{current_line}\n\n"
+            f"{placeholder}\n\n"
+            "Отправь новое значение:",
+            reply_markup=kb,
         )
 
 
-@router.message(PromptConfig.awaiting_new_prompt)
-async def pr_save_prompt(message: Message, state: FSMContext) -> None:
+@router.message(ChatSettings.awaiting_value)
+async def cs_save_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    chat_id = data.get("pr_chat_id", "")
-    tier = data.get("pr_tier", "")
-    new_prompt = (message.text or "").strip()
-    if not new_prompt:
-        await message.answer("Промпт не может быть пустым. Попробуй ещё раз:")
+    chat_id = data.get("cs_chat_id", "")
+    field = data.get("cs_field", "")
+    new_value = (message.text or "").strip()
+    if not new_value:
+        await message.answer("Значение не может быть пустым. Попробуй ещё раз:")
         return
-    await repo.set_chat_prompt(chat_id, tier, new_prompt)
+    await repo.update_chat_settings(chat_id, {field: new_value})
     await state.clear()
-    await message.answer(f"✅ Промпт сохранён для `{chat_id}` (тир: {tier})")
+
+    settings_doc = await repo.get_chat_settings(chat_id)
+    title = await repo.get_chat_title(chat_id)
+    text = _cs_card_text(chat_id, title, settings_doc)
+    kb = _cs_card_keyboard(chat_id, settings_doc)
+    await message.answer("✅ Сохранено")
+    await message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("pr_reset:"))
-async def pr_reset(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("cs_cancel:"))
+async def cs_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    if not callback.data:
+        return
+    chat_id = callback.data.split(":", 1)[1]
+    settings_doc = await repo.get_chat_settings(chat_id)
+    title = await repo.get_chat_title(chat_id)
+    text = _cs_card_text(chat_id, title, settings_doc)
+    kb = _cs_card_keyboard(chat_id, settings_doc)
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cs_reset:"))
+async def cs_reset_field(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.data:
         return
-    _, chat_id, tier = callback.data.split(":", 2)
-    await repo.set_chat_prompt(chat_id, tier, None)
+    _, chat_id, field = callback.data.split(":", 2)
+    await repo.clear_chat_settings_field(chat_id, field)
+    settings_doc = await repo.get_chat_settings(chat_id)
+    title = await repo.get_chat_title(chat_id)
+    text = _cs_card_text(chat_id, title, settings_doc)
+    kb = _cs_card_keyboard(chat_id, settings_doc)
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(f"🔄 Промпт сброшен к дефолту для `{chat_id}` (тир: {tier})")
+        await msg.edit_text(text, reply_markup=kb)

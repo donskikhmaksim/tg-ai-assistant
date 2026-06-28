@@ -28,6 +28,20 @@ from .windows import build_window, render_window
 logger = logging.getLogger(__name__)
 
 
+def _build_chat_context(doc: dict) -> str:
+    """Build a shared context preamble from chat settings fields."""
+    lines = []
+    if doc.get("who"):
+        lines.append(f"Кто этот человек / о чём чат: {doc['who']}")
+    if doc.get("topics"):
+        lines.append(f"Темы переписки: {doc['topics']}")
+    if doc.get("task_side"):
+        lines.append(f"Кому обычно ставятся задачи: {doc['task_side']}")
+    if not lines:
+        return ""
+    return "--- Контекст этого чата ---\n" + "\n".join(lines) + "\n---"
+
+
 async def run_batch() -> None:
     s = get_settings()
     chats = await repo.get_dirty_chats(s.quiet_minutes, s.max_dirty_minutes)
@@ -57,13 +71,14 @@ async def process_chat(chat_id: str) -> None:
     # Archive embeddings for retrieval (dedup'd; permanent, survives raw TTL).
     await retrieval.index_messages(chat_id, messages)
 
-    # Load per-chat prompt overrides.
+    # Load per-chat settings (context fields + filter/extract rules).
     settings_doc = await repo.get_chat_settings(chat_id)
-    tier1_prompt = settings_doc.get("tier1_prompt")
-    tier2_prompt = settings_doc.get("tier2_prompt")
+    chat_context = _build_chat_context(settings_doc)
+    filter_rules = settings_doc.get("filter_rules")
+    extract_rules = settings_doc.get("extract_rules")
 
     # Tier 1 — cheap local gate.
-    if not await qwen.has_task(window_text, system_override=tier1_prompt):
+    if not await qwen.has_task(window_text, chat_context=chat_context, filter_rules=filter_rules):
         logger.info("Chat %s: Qwen says no task", chat_id)
         await repo.mark_processed(chat_id)
         return
@@ -75,7 +90,10 @@ async def process_chat(chat_id: str) -> None:
     # Tier 2 — Claude with long-term memory + retrieved context.
     summary = await repo.get_summary(chat_id)
     open_tasks = await repo.get_open_tasks(chat_id)
-    result = await claude.extract(window_text, summary, open_tasks, retrieved, system_override=tier2_prompt)
+    result = await claude.extract(
+        window_text, summary, open_tasks, retrieved,
+        chat_context=chat_context, extract_rules=extract_rules,
+    )
 
     # Memory first: persist the refreshed summary before raw expires.
     new_summary = result.get("updated_summary")

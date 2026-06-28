@@ -173,15 +173,26 @@ def _build_user_prompt(
     )
 
 
+def _build_system(chat_context: str = "", extract_rules: str | None = None) -> str:
+    """Compose the final system prompt: default + optional context + optional rules."""
+    parts = [SYSTEM_PROMPT]
+    if chat_context:
+        parts.append(chat_context)
+    if extract_rules:
+        parts.append(f"Дополнительные правила извлечения для этого чата:\n{extract_rules}")
+    return "\n\n".join(parts)
+
+
 async def extract(
     window_text: str,
     summary: str,
     open_tasks: list[dict[str, Any]],
     retrieved: list[str] | None = None,
-    system_override: str | None = None,
+    chat_context: str = "",
+    extract_rules: str | None = None,
 ) -> dict[str, Any]:
     s = get_settings()
-    system = system_override or SYSTEM_PROMPT
+    system = _build_system(chat_context, extract_rules)
     resp = await _get_client().messages.create(
         model=s.anthropic_model,
         max_tokens=8000,

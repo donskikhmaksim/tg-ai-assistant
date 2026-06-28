@@ -290,29 +290,39 @@ async def get_bot_state(key: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# chat_settings (per-chat LLM prompt overrides)
+# chat_settings (per-chat context + LLM rule overrides)
+#
+# Schema:
+#   chatId        str
+#   who           str | None  — who this person is / what the group is about
+#   topics        str | None  — what is usually discussed
+#   task_side     str | None  — who tasks are assigned to
+#   filter_rules  str | None  — Qwen: additional rules for detecting tasks
+#   extract_rules str | None  — Claude: additional rules for extracting tasks
 # ---------------------------------------------------------------------------
 
 async def get_chat_settings(chat_id: str) -> dict[str, Any]:
-    """Returns dict with keys tier1_prompt, tier2_prompt (or absent if not set)."""
+    """Returns the full settings document for a chat, or {} if none."""
     db = get_db()
     doc = await db.chat_settings.find_one({"chatId": chat_id})
     return doc or {}
 
 
-async def set_chat_prompt(chat_id: str, tier: str, prompt: str | None) -> None:
-    """Set or clear (if prompt=None) a prompt for tier ('tier1' or 'tier2')."""
+async def update_chat_settings(chat_id: str, fields: dict[str, Any]) -> None:
+    """Upsert the given fields into the chat settings document."""
     db = get_db()
-    key = f"{tier}_prompt"
-    if prompt is None:
-        await db.chat_settings.update_one(
-            {"chatId": chat_id},
-            {"$unset": {key: ""}, "$setOnInsert": {"chatId": chat_id}},
-            upsert=True,
-        )
-    else:
-        await db.chat_settings.update_one(
-            {"chatId": chat_id},
-            {"$set": {"chatId": chat_id, key: prompt}},
-            upsert=True,
-        )
+    await db.chat_settings.update_one(
+        {"chatId": chat_id},
+        {"$set": {"chatId": chat_id, **fields}},
+        upsert=True,
+    )
+
+
+async def clear_chat_settings_field(chat_id: str, field: str) -> None:
+    """Unset a single field from the chat settings document."""
+    db = get_db()
+    await db.chat_settings.update_one(
+        {"chatId": chat_id},
+        {"$unset": {field: ""}, "$setOnInsert": {"chatId": chat_id}},
+        upsert=True,
+    )
