@@ -3,659 +3,610 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Чаты</title>
+  <title>Большой брат</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
       --bg: var(--tg-theme-bg-color, #18191c);
       --text: var(--tg-theme-text-color, #e8e8ea);
       --hint: var(--tg-theme-hint-color, #8a8f98);
-      --card: var(--tg-theme-secondary-bg-color, #232528);
+      --card: var(--tg-theme-secondary-bg-color, #232428);
       --accent: var(--tg-theme-button-color, #2ea6ff);
       --accent-text: var(--tg-theme-button-text-color, #fff);
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      margin: 0; padding: 12px 12px 40px;
+      padding: 12px 12px 40px;
       font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg); color: var(--text);
     }
 
-    .search-bar {
-      width: 100%; padding: 10px 14px; border-radius: 12px; border: none;
-      background: var(--card); color: var(--text); font-size: 15px; margin-bottom: 12px;
-      font-family: inherit;
+    /* Search */
+    .search-wrap { position: relative; margin-bottom: 12px; }
+    .search-wrap::before {
+      content: "🔍"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+      font-size: 15px; pointer-events: none;
     }
-    .search-bar:focus { outline: none; }
-    .search-bar::placeholder { color: var(--hint); }
+    #searchInput {
+      width: 100%; padding: 10px 12px 10px 36px; border-radius: 12px; border: none;
+      background: var(--card); color: var(--text); font-size: 15px;
+    }
+    #searchInput:focus { outline: 2px solid var(--accent); }
+    #searchInput::placeholder { color: var(--hint); }
 
+    #addBtn {
+      display: none; width: 100%; margin-bottom: 12px; padding: 12px;
+      border: none; border-radius: 11px; background: var(--accent); color: var(--accent-text);
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+
+    /* Chat cards */
     .chat-card { background: var(--card); border-radius: 14px; margin-bottom: 8px; overflow: hidden; }
     .chat-header {
       display: flex; align-items: center; gap: 10px;
       padding: 12px 14px; cursor: pointer; user-select: none;
     }
-    .chat-emoji { font-size: 18px; flex-shrink: 0; }
-    .chat-name-wrap { flex: 1; min-width: 0; }
+    .chat-emoji { font-size: 20px; flex-shrink: 0; }
+    .chat-info { flex: 1; min-width: 0; }
+    .chat-name-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
     .chat-name { font-weight: 600; font-size: 15px; }
-    .chat-alias { color: var(--hint); font-size: 13px; margin-left: 6px; }
-    .chat-meta { color: var(--hint); font-size: 12px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .chat-chevron { margin-left: auto; color: var(--hint); transition: transform .2s; flex-shrink: 0; font-size: 13px; }
+    .chat-alias-badge { color: var(--hint); font-size: 13px; }
+    .chat-meta { color: var(--hint); font-size: 12px; margin-top: 2px; }
+    .chat-chevron { color: var(--hint); font-size: 12px; flex-shrink: 0; transition: transform .2s; }
     .chat-chevron.open { transform: rotate(180deg); }
+
     .chat-body { display: none; padding: 0 14px 14px; }
     .chat-body.open { display: block; }
 
-    .section-header {
-      font-weight: 600; font-size: 13px; color: var(--hint);
-      padding: 10px 0 6px; cursor: pointer; display: flex; justify-content: space-between;
-      border-bottom: 1px solid rgba(128,128,128,.2); margin-bottom: 8px;
+    /* Blocks inside card */
+    .block { margin-top: 10px; border-radius: 10px; overflow: hidden; }
+    .block-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 12px; background: var(--bg); cursor: pointer; user-select: none;
+      font-size: 13px; font-weight: 600; color: var(--hint);
     }
-    .section-header-chev { font-size: 11px; }
-    .section-body { }
-    .section-body.collapsed { display: none; }
+    .block-header .bchev { transition: transform .2s; }
+    .block-header.open .bchev { transform: rotate(180deg); }
+    .block-body { padding: 10px 12px 12px; background: var(--bg); }
+    .block-body.collapsed { display: none; }
+
+    select {
+      width: 100%; padding: 9px 10px; border-radius: 9px; border: 1px solid transparent;
+      background: var(--card); color: var(--text); font-size: 15px; appearance: none; cursor: pointer;
+    }
+    select:focus { outline: 2px solid var(--accent); }
+    .select-wrap { position: relative; margin-bottom: 8px; }
+    .select-wrap::after {
+      content: "▾"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      color: var(--hint); pointer-events: none;
+    }
+    .saved-label { color: var(--accent); font-size: 12px; min-height: 16px; margin-top: 2px; }
+
+    .alias-input {
+      width: 100%; padding: 9px 12px; border-radius: 10px;
+      border: 1px solid transparent; background: var(--card);
+      color: var(--text); font-size: 15px; font-family: inherit;
+    }
+    .alias-input:focus { outline: none; border-color: var(--accent); }
+    .field-hint { color: var(--hint); font-size: 12px; margin-top: 4px; }
 
     .field-label { font-size: 12px; color: var(--hint); margin: 10px 0 3px; }
+    .field-label:first-child { margin-top: 0; }
     textarea {
       width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid transparent;
-      background: var(--bg); color: var(--text); font-size: 14px; font-family: inherit;
+      background: var(--card); color: var(--text); font-size: 14px; font-family: inherit;
       resize: none; overflow: hidden; min-height: 38px; line-height: 1.4;
     }
     textarea:focus { outline: none; border-color: var(--accent); }
 
-    .alias-input {
-      width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid transparent;
-      background: var(--bg); color: var(--text); font-size: 15px; font-family: inherit;
-    }
-    .alias-input:focus { outline: none; border-color: var(--accent); }
-    .alias-hint { font-size: 11px; color: var(--hint); margin-top: 4px; }
-
     .bulk-btn {
       width: 100%; margin-top: 12px; padding: 10px; border: none; border-radius: 10px;
-      background: var(--bg); color: var(--accent); font-size: 14px; font-weight: 600; cursor: pointer;
+      background: var(--card); color: var(--accent); font-size: 14px; font-weight: 600; cursor: pointer;
     }
 
-    select {
-      width: 100%; padding: 9px 10px; border-radius: 9px; border: 1px solid transparent;
-      background: var(--bg); color: var(--text); font-size: 15px; appearance: none;
-      font-family: inherit;
-    }
-    select:focus { outline: none; border-color: var(--accent); }
-    .proj-saved { font-size: 12px; color: var(--accent); min-height: 14px; margin-top: 2px; }
-
-    .empty-state { text-align: center; color: var(--hint); margin-top: 60px; font-size: 15px; }
-    .err { text-align: center; color: #e05a5a; margin-top: 40px; }
-
-    #toast {
-      position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
-      background: var(--accent); color: var(--accent-text); padding: 8px 16px;
-      border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s;
-      pointer-events: none; z-index: 200; white-space: nowrap;
-    }
-    #toast.show { opacity: 1; }
-
-    /* Bulk overlay */
+    /* Bottom sheet */
     .overlay {
       position: fixed; inset: 0; background: rgba(0,0,0,.5);
-      display: flex; align-items: flex-end; z-index: 100;
+      display: none; align-items: flex-end; z-index: 100;
     }
-    .overlay.hidden { display: none; }
+    .overlay.show { display: flex; }
     .sheet {
       background: var(--bg); border-radius: 20px 20px 0 0;
-      padding: 16px 12px 32px; width: 100%; max-height: 80vh; overflow-y: auto;
+      padding: 16px 14px 32px; width: 100%; max-height: 80vh; overflow-y: auto;
     }
     .sheet-title { font-weight: 700; font-size: 16px; margin-bottom: 10px; }
-    .quick-sel { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+    .quick-sel { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
     .quick-btn {
       padding: 6px 12px; border: none; border-radius: 8px;
       background: var(--card); color: var(--text); font-size: 13px; cursor: pointer;
     }
-    .chat-row-check {
+    .check-row {
       display: flex; align-items: center; gap: 10px;
       padding: 10px 4px; border-bottom: 1px solid var(--card); cursor: pointer;
     }
     .check-box {
       width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--hint);
-      flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-      font-size: 13px;
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 13px;
     }
     .check-box.checked { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .apply-btn {
-      width: 100%; margin-top: 12px; padding: 12px;
-      border: none; border-radius: 11px; background: var(--accent); color: var(--accent-text);
-      font-size: 15px; font-weight: 600; cursor: pointer;
+    .sheet-actions { display: flex; gap: 8px; margin-top: 14px; }
+    .sheet-apply {
+      flex: 1; padding: 12px; border: none; border-radius: 11px;
+      background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600; cursor: pointer;
     }
-    .close-btn {
-      width: 100%; margin-top: 8px; padding: 10px;
-      border: none; border-radius: 11px; background: var(--card); color: var(--hint);
-      font-size: 14px; cursor: pointer;
+    .sheet-close {
+      padding: 12px 18px; border: none; border-radius: 11px;
+      background: var(--card); color: var(--text); font-size: 15px; cursor: pointer;
+    }
+
+    #toast {
+      position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+      background: var(--accent); color: var(--accent-text); padding: 8px 18px;
+      border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s;
+      pointer-events: none; white-space: nowrap; z-index: 200;
+    }
+    #toast.show { opacity: 1; }
+
+    .empty { text-align: center; color: var(--hint); margin-top: 40px; }
+    .err { text-align: center; color: #e05a5a; margin-top: 40px; }
+    .section-divider {
+      color: var(--hint); font-size: 11px; text-transform: uppercase;
+      letter-spacing: .05em; margin: 16px 4px 6px;
     }
   </style>
 </head>
 <body>
 
-  <input class="search-bar" id="searchInput" type="search" placeholder="🔍 Поиск по имени или псевдониму" />
+<div class="search-wrap">
+  <input id="searchInput" type="search" placeholder="Поиск по имени или алиасу…" autocomplete="off" />
+</div>
+<button id="addBtn">➕ Добавить бота в группу</button>
+<div id="content"><div class="empty">Загрузка…</div></div>
+<div id="toast"></div>
 
-  <div id="chatList"></div>
-
-  <div id="toast"></div>
-
-  <!-- Bulk overlay -->
-  <div class="overlay hidden" id="bulkOverlay">
-    <div class="sheet">
-      <div class="sheet-title" id="bulkTitle">Применить настройки к:</div>
-      <div class="quick-sel">
-        <button class="quick-btn" onclick="bulkSelectAll()">Все</button>
-        <button class="quick-btn" onclick="bulkSelectKind('dm')">Все лички</button>
-        <button class="quick-btn" onclick="bulkSelectKind('group')">Все группы</button>
-        <button class="quick-btn" onclick="bulkSelectNone()">Очистить</button>
-      </div>
-      <div id="bulkList"></div>
-      <button class="apply-btn" id="bulkApplyBtn" onclick="doBulkApply()">📤 Применить к выбранным (0)</button>
-      <button class="close-btn" onclick="closeBulkOverlay()">✕ Закрыть</button>
+<div class="overlay" id="overlay">
+  <div class="sheet">
+    <div class="sheet-title" id="sheetTitle">Применить настройки к:</div>
+    <div class="quick-sel">
+      <button class="quick-btn" onclick="selectQuick('all')">Все</button>
+      <button class="quick-btn" onclick="selectQuick('dm')">Все лички</button>
+      <button class="quick-btn" onclick="selectQuick('group')">Все группы</button>
+      <button class="quick-btn" onclick="selectQuick('none')">Очистить</button>
+    </div>
+    <div id="sheetList"></div>
+    <div class="sheet-actions">
+      <button class="sheet-apply" id="sheetApply">📤 Применить (0)</button>
+      <button class="sheet-close" onclick="closeSheet()">✕</button>
     </div>
   </div>
+</div>
 
-  <script>
-    const tg = window.Telegram?.WebApp;
-    tg?.ready();
-    tg?.expand();
+<script>
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+  const INIT = tg?.initData || "";
 
-    const INIT = tg?.initData || "";
-    const $chatList = document.getElementById("chatList");
-    const $toast = document.getElementById("toast");
-    let toastTimer;
-    let allChats = [];   // from API
-    let allProjects = [];
-    let bulkSourceId = "__global__";
-    let bulkSourceTitle = "Глобальные";
-    let bulkSelected = new Set();
+  let allChats = [];
+  let allProjects = [];
+  let bulkSourceId = null;
+  let bulkSelected = new Set();
 
-    const FIELDS = [
-      { key: "who",          label: "👤 Кто этот человек / о чём чат",        placeholder: "Напр.: деловой партнёр, вместе ведём автопарк в Лос-Анджелесе" },
-      { key: "topics",       label: "💬 Что обычно обсуждаете",               placeholder: "Напр.: закупки, платежи, вэны, ремонт, планы поездок" },
-      { key: "task_side",    label: "🎯 Кому ставятся задачи",                placeholder: "Напр.: задачи в основном мне, он больше информирует" },
-      { key: "importance",   label: "⭐ Когда задача важная, а когда нет",     placeholder: "Напр.: важны только задачи с деньгами или дедлайном" },
-      { key: "people",       label: "👥 Кто ещё участвует (имена, роли)",     placeholder: "Напр.: Коля — прораб, Артём — водитель, Оскар — финансы" },
-      { key: "filter_rules", label: "🔍 Как понять, задача это или нет",      placeholder: "Напр.: любые упоминания денег и дат — задача" },
-      { key: "extract_rules",label: "✍️ Как вытаскивать задачи",             placeholder: "Напр.: всегда фиксируй сумму; дедлайн считай жёстким" },
-    ];
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g,
+      c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
 
-    // ── utils ───────────────────────────────────────────────────────────────
+  let toastTimer;
+  function toast(msg) {
+    const el = document.getElementById("toast");
+    el.textContent = msg; el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 1600);
+  }
 
-    function toast(msg) {
-      $toast.textContent = msg;
-      $toast.classList.add("show");
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => $toast.classList.remove("show"), 1500);
-    }
+  function timeAgo(iso) {
+    if (!iso) return "";
+    const diff = Date.now() - new Date(iso).getTime();
+    const m = Math.floor(diff / 60000);
+    if (m < 2) return "только что";
+    if (m < 60) return m + "м назад";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "ч назад";
+    const d = Math.floor(h / 24);
+    if (d === 1) return "вчера";
+    return d + "д назад";
+  }
 
-    async function api(path, body, method) {
-      const isGet = (method || (body === undefined ? "GET" : "POST")) === "GET";
-      const res = await fetch(path, {
-        method: isGet ? "GET" : "POST",
-        headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": INIT },
-        ...(isGet ? {} : { body: JSON.stringify(body || {}) }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.status);
-      return res.json();
-    }
+  async function api(path, body) {
+    const isGet = body === undefined;
+    const res = await fetch(path, {
+      method: isGet ? "GET" : "POST",
+      headers: {"Content-Type":"application/json","X-Telegram-Init-Data":INIT},
+      ...(isGet ? {} : {body: JSON.stringify(body)}),
+    });
+    if (!res.ok) throw new Error((await res.text()) || res.status);
+    return res.json();
+  }
 
-    function esc(s) {
-      return String(s).replace(/[&<>"']/g, c =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    }
+  function autoResize(el) {
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }
 
-    function timeAgo(iso) {
-      if (!iso) return "";
-      const diff = Date.now() - new Date(iso).getTime();
-      const m = Math.floor(diff / 60000);
-      if (m < 60) return m + "м назад";
-      const h = Math.floor(m / 60);
-      if (h < 24) return h + "ч назад";
-      const d = Math.floor(h / 24);
-      if (d === 1) return "вчера";
-      return d + "д назад";
-    }
+  // ── render ────────────────────────────────────────────────────────────────
 
-    function autoResize(ta) {
-      ta.style.height = "auto";
-      ta.style.height = ta.scrollHeight + "px";
-    }
-
-    function toggleSection(headerEl) {
-      const body = headerEl.nextElementSibling;
-      const chev = headerEl.querySelector(".section-header-chev");
-      body.classList.toggle("collapsed");
-      chev.textContent = body.classList.contains("collapsed") ? "▸" : "▾";
-    }
-
-    // ── card builder ────────────────────────────────────────────────────────
-
-    function buildCard(chatId, title, kind, lastMessageAt, initialAlias, initialSettings, initialBinding) {
-      const isGlobal = kind === "global";
-      const emoji = isGlobal ? "🌐" : (kind === "group" ? "👥" : "👤");
-
-      const card = document.createElement("div");
-      card.className = "chat-card";
-      card.dataset.chatId = chatId;
-      card.dataset.kind = kind;
-      card.dataset.title = (title || "").toLowerCase();
-      card.dataset.alias = (initialAlias || "").toLowerCase();
-
-      // ── header ──
-      const header = document.createElement("div");
-      header.className = "chat-header";
-
-      const emojiEl = document.createElement("div");
-      emojiEl.className = "chat-emoji";
-      emojiEl.textContent = emoji;
-
-      const nameWrap = document.createElement("div");
-      nameWrap.className = "chat-name-wrap";
-
-      const nameLine = document.createElement("div");
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "chat-name";
-      nameSpan.textContent = title;
-      nameLine.appendChild(nameSpan);
-
-      const aliasSpan = document.createElement("span");
-      aliasSpan.className = "chat-alias";
-      aliasSpan.textContent = initialAlias ? "· " + initialAlias : "";
-      nameLine.appendChild(aliasSpan);
-
-      const metaEl = document.createElement("div");
-      metaEl.className = "chat-meta";
-      const ta = timeAgo(lastMessageAt);
-      metaEl.textContent = isGlobal ? "Применяется ко всем чатам" : (chatId + (ta ? "  ·  " + ta : ""));
-
-      nameWrap.appendChild(nameLine);
-      nameWrap.appendChild(metaEl);
-
-      const chevron = document.createElement("div");
-      chevron.className = "chat-chevron";
-      chevron.textContent = "▾";
-
-      header.appendChild(emojiEl);
-      header.appendChild(nameWrap);
-      header.appendChild(chevron);
-
-      const body = document.createElement("div");
-      body.className = "chat-body";
-
-      header.addEventListener("click", () => {
-        const isOpen = body.classList.toggle("open");
-        chevron.classList.toggle("open", isOpen);
-        if (isOpen && !body._loaded) {
-          body._loaded = true;
-          populateBody(body, chatId, kind, title, aliasSpan, initialSettings, initialBinding);
-        }
-      });
-
-      card.appendChild(header);
-      card.appendChild(body);
-      return card;
-    }
-
-    function populateBody(body, chatId, kind, title, aliasSpan, settings, binding) {
-      const isGlobal = kind === "global";
-
-      // ── Section 1: Project ──
-      if (!isGlobal) {
-        const projHeader = document.createElement("div");
-        projHeader.className = "section-header";
-        projHeader.innerHTML = '<span>📦 Проект и раздел</span><span class="section-header-chev">▾</span>';
-        const projBody = document.createElement("div");
-        projBody.className = "section-body";
-
-        const projLbl = document.createElement("div");
-        projLbl.className = "field-label";
-        projLbl.textContent = "Проект";
-        projBody.appendChild(projLbl);
-
-        const selP = document.createElement("select");
-        const noneOpt = document.createElement("option");
-        noneOpt.value = ""; noneOpt.textContent = "— не привязано —";
-        selP.appendChild(noneOpt);
-        for (const p of allProjects) {
-          const opt = document.createElement("option");
-          opt.value = p.id; opt.textContent = p.name;
-          if (binding && p.id === binding.boundProjectId) opt.selected = true;
-          selP.appendChild(opt);
-        }
-        projBody.appendChild(selP);
-
-        const sectLbl = document.createElement("div");
-        sectLbl.className = "field-label";
-        sectLbl.textContent = "Раздел";
-        projBody.appendChild(sectLbl);
-
-        const selS = document.createElement("select");
-        selS.style.display = "none";
-        projBody.appendChild(selS);
-
-        const projSaved = document.createElement("div");
-        projSaved.className = "proj-saved";
-        projBody.appendChild(projSaved);
-
-        if (binding && binding.boundProjectId) {
-          loadSections(selP, selS, binding.boundProjectId, binding.boundSectionId, projSaved, chatId);
-        }
-
-        selP.addEventListener("change", async () => {
-          const pid = selP.value;
-          projSaved.textContent = "Сохраняю…";
-          try {
-            if (pid) {
-              const r = await api("/api/bind", { chatId, projectId: pid });
-              projSaved.textContent = "✓ " + r.projectName;
-              await loadSections(selP, selS, pid, null, projSaved, chatId);
-            } else {
-              await api("/api/unbind", { chatId });
-              projSaved.textContent = "Отвязано";
-              selS.style.display = "none";
-            }
-            tg?.HapticFeedback?.notificationOccurred("success");
-            toast("Сохранено");
-          } catch (e) {
-            projSaved.textContent = "Ошибка: " + e.message;
-          }
-        });
-
-        selS.addEventListener("change", async () => {
-          const pid = selP.value;
-          if (!pid) return;
-          try {
-            const r = await api("/api/bind", { chatId, projectId: pid, sectionId: selS.value });
-            projSaved.textContent = "✓ " + r.projectName + (r.sectionName ? " / " + r.sectionName : "");
-            toast("Сохранено");
-          } catch (e) {
-            projSaved.textContent = "Ошибка: " + e.message;
-          }
-        });
-
-        projHeader.addEventListener("click", () => toggleSection(projHeader));
-        body.appendChild(projHeader);
-        body.appendChild(projBody);
-
-        // ── Section 2: Alias ──
-        const aliasHeader = document.createElement("div");
-        aliasHeader.className = "section-header";
-        aliasHeader.innerHTML = '<span>🏷 Псевдоним</span><span class="section-header-chev">▸</span>';
-        const aliasBody = document.createElement("div");
-        aliasBody.className = "section-body collapsed";
-
-        const aliasLbl = document.createElement("div");
-        aliasLbl.className = "field-label";
-        aliasLbl.textContent = "Псевдоним чата";
-        aliasBody.appendChild(aliasLbl);
-
-        const aliasInput = document.createElement("input");
-        aliasInput.type = "text";
-        aliasInput.className = "alias-input";
-        aliasInput.placeholder = "Напр.: Влад или Алина";
-        aliasInput.value = settings.alias || "";
-        aliasBody.appendChild(aliasInput);
-
-        const aliasHint = document.createElement("div");
-        aliasHint.className = "alias-hint";
-        aliasHint.textContent = "Сохраняется при потере фокуса. Используется в поиске.";
-        aliasBody.appendChild(aliasHint);
-
-        aliasInput.addEventListener("blur", async () => {
-          try {
-            const val = aliasInput.value.trim();
-            await api("/api/settings", { chatId, alias: val });
-            // update header alias span
-            aliasSpan.textContent = val ? "· " + val : "";
-            // update card dataset for search
-            aliasInput.closest(".chat-card").dataset.alias = val.toLowerCase();
-            toast("Псевдоним сохранён ✓");
-          } catch (e) {
-            toast("Ошибка: " + e.message);
-          }
-        });
-
-        aliasHeader.addEventListener("click", () => toggleSection(aliasHeader));
-        body.appendChild(aliasHeader);
-        body.appendChild(aliasBody);
-      }
-
-      // ── Section 3 (or 1 for global): Settings ──
-      const settHeader = document.createElement("div");
-      settHeader.className = "section-header";
-      settHeader.innerHTML = '<span>⚙️ Настройки (промпты)</span><span class="section-header-chev">▸</span>';
-      const settBody = document.createElement("div");
-      settBody.className = "section-body collapsed";
-
-      for (const f of FIELDS) {
-        const lbl = document.createElement("div");
-        lbl.className = "field-label";
-        lbl.textContent = f.label;
-        settBody.appendChild(lbl);
-
-        const ta = document.createElement("textarea");
-        ta.rows = 2;
-        ta.placeholder = f.placeholder;
-        ta.value = settings[f.key] || "";
-        ta.dataset.field = f.key;
-        settBody.appendChild(ta);
-
-        ta.addEventListener("input", () => autoResize(ta));
-        ta.addEventListener("blur", async () => {
-          try {
-            await api("/api/settings", { chatId, [f.key]: ta.value });
-            toast("Сохранено ✓");
-          } catch (e) {
-            toast("Ошибка: " + e.message);
-          }
-        });
-        setTimeout(() => autoResize(ta), 0);
-      }
-
-      const bulkBtn = document.createElement("button");
-      bulkBtn.className = "bulk-btn";
-      bulkBtn.textContent = "📤 Применить к нескольким чатам";
-      bulkBtn.onclick = () => openBulkOverlay(chatId, title || "Глобальные");
-      settBody.appendChild(bulkBtn);
-
-      settHeader.addEventListener("click", () => toggleSection(settHeader));
-      body.appendChild(settHeader);
-      body.appendChild(settBody);
-    }
-
-    async function loadSections(selP, selS, projectId, selectedSectionId, savedEl, chatId) {
-      selS.innerHTML = '<option value="">— загрузка разделов… —</option>';
-      selS.style.display = "block";
-      try {
-        const r = await api("/api/sections", { projectId });
-        const secs = r.sections || [];
-        if (!secs.length) { selS.style.display = "none"; return; }
-        const noneOpt = document.createElement("option");
-        noneOpt.value = ""; noneOpt.textContent = "— без раздела —";
-        selS.innerHTML = "";
-        selS.appendChild(noneOpt);
-        for (const s of secs) {
-          const opt = document.createElement("option");
-          opt.value = s.id; opt.textContent = s.name;
-          if (s.id === selectedSectionId) opt.selected = true;
-          selS.appendChild(opt);
-        }
-        selS.style.display = "block";
-      } catch (e) {
-        selS.style.display = "none";
-      }
-    }
-
-    // ── render all cards ────────────────────────────────────────────────────
-
-    async function renderAll(data) {
-      $chatList.innerHTML = "";
-
-      // Global card — fetch settings once
-      const globalSettings = await api("/api/settings?chatId=__global__", undefined, "GET");
-      const globalCard = buildCard("__global__", "🌐 Глобальные настройки", "global", null, null, globalSettings, null);
-      $chatList.appendChild(globalCard);
-
-      // Chat cards — fetch settings for each
-      for (const c of data.chats) {
-        const settings = await api(`/api/settings?chatId=${encodeURIComponent(c.chatId)}`, undefined, "GET");
-        const binding = {
-          boundProjectId: c.boundProjectId,
-          boundSectionId: c.boundSectionId,
-          boundSectionName: c.boundSectionName,
-        };
-        const card = buildCard(c.chatId, c.title, c.kind, c.lastMessageAt, c.alias, settings, binding);
-        $chatList.appendChild(card);
-      }
-    }
-
-    // ── search ──────────────────────────────────────────────────────────────
-
-    document.getElementById("searchInput").addEventListener("input", function() {
-      const q = this.value.trim().toLowerCase();
-      let any = false;
-      document.querySelectorAll(".chat-card").forEach(card => {
-        if (!q) { card.style.display = ""; any = true; return; }
-        const t = card.dataset.title || "";
-        const a = card.dataset.alias || "";
-        const match = t.includes(q) || a.includes(q);
-        card.style.display = match ? "" : "none";
-        if (match) any = true;
-      });
-      let noMatch = document.getElementById("noMatch");
-      if (!any && q) {
-        if (!noMatch) {
-          noMatch = document.createElement("div");
-          noMatch.id = "noMatch";
-          noMatch.className = "empty-state";
-          noMatch.textContent = "Ничего не найдено";
-          $chatList.appendChild(noMatch);
-        }
-      } else if (noMatch) {
-        noMatch.remove();
-      }
+  function render(data) {
+    allProjects = data.projects || [];
+    // Sort by message count desc, fallback to lastMessageAt
+    allChats = (data.chats || []).sort((a, b) => {
+      const ca = (a.messageCount || 0), cb = (b.messageCount || 0);
+      if (ca !== cb) return cb - ca;
+      return (b.lastMessageAt || "") > (a.lastMessageAt || "") ? 1 : -1;
     });
 
-    // ── bulk overlay ────────────────────────────────────────────────────────
-
-    function openBulkOverlay(sourceId, sourceTitle) {
-      bulkSourceId = sourceId;
-      bulkSourceTitle = sourceTitle;
-      bulkSelected = new Set();
-      document.getElementById("bulkTitle").textContent = `Применить настройки из «${sourceTitle}» к:`;
-
-      const list = document.getElementById("bulkList");
-      list.innerHTML = "";
-
-      const targets = [
-        { chatId: "__global__", title: "🌐 Глобальные", kind: "global" },
-        ...allChats,
-      ].filter(c => c.chatId !== sourceId);
-
-      for (const c of targets) {
-        const row = document.createElement("div");
-        row.className = "chat-row-check";
-        row.dataset.chatId = c.chatId;
-        row.dataset.kind = c.kind || "global";
-
-        const box = document.createElement("div");
-        box.className = "check-box";
-
-        const nameEl = document.createElement("span");
-        nameEl.textContent = c.title;
-
-        row.appendChild(box);
-        row.appendChild(nameEl);
-
-        row.addEventListener("click", () => {
-          if (bulkSelected.has(c.chatId)) {
-            bulkSelected.delete(c.chatId);
-            box.classList.remove("checked");
-            box.textContent = "";
-          } else {
-            bulkSelected.add(c.chatId);
-            box.classList.add("checked");
-            box.textContent = "✓";
-          }
-          updateBulkCount();
-        });
-
-        list.appendChild(row);
-      }
-
-      updateBulkCount();
-      document.getElementById("bulkOverlay").classList.remove("hidden");
+    const $c = document.getElementById("content");
+    if (!allChats.length) {
+      $c.innerHTML = `<div class="empty">Бот ещё не видел ни одного чата.<br>Напиши ему в личку или добавь в группу.</div>`;
+      return;
     }
 
-    function updateBulkCount() {
-      document.getElementById("bulkApplyBtn").textContent =
-        `📤 Применить к выбранным (${bulkSelected.size})`;
+    $c.innerHTML = "";
+    $c.appendChild(buildGlobalCard());
+
+    const groups = allChats.filter(c => c.kind === "group");
+    const dms    = allChats.filter(c => c.kind === "dm");
+
+    if (groups.length) {
+      const lbl = document.createElement("div");
+      lbl.className = "section-divider"; lbl.textContent = "Группы";
+      $c.appendChild(lbl);
+      groups.forEach(c => $c.appendChild(buildChatCard(c)));
+    }
+    if (dms.length) {
+      const lbl = document.createElement("div");
+      lbl.className = "section-divider"; lbl.textContent = "Личные чаты";
+      $c.appendChild(lbl);
+      dms.forEach(c => $c.appendChild(buildChatCard(c)));
     }
 
-    function bulkSelectAll() {
-      document.querySelectorAll("#bulkList .chat-row-check").forEach(row => {
-        bulkSelected.add(row.dataset.chatId);
-        const box = row.querySelector(".check-box");
-        box.classList.add("checked");
-        box.textContent = "✓";
-      });
-      updateBulkCount();
+    document.getElementById("searchInput").addEventListener("input", filterCards);
+  }
+
+  // ── Global card ───────────────────────────────────────────────────────────
+
+  function buildGlobalCard() {
+    const card = document.createElement("div");
+    card.className = "chat-card";
+    card.dataset.name = "глобальные global";
+    card.dataset.alias = "";
+    card.innerHTML = `
+      <div class="chat-header" onclick="toggleCard(this)">
+        <span class="chat-emoji">🌐</span>
+        <div class="chat-info">
+          <div class="chat-name-row"><span class="chat-name">Глобальные настройки</span></div>
+          <div class="chat-meta">Применяются ко всем чатам как база</div>
+        </div>
+        <span class="chat-chevron">▾</span>
+      </div>
+      <div class="chat-body">${buildPromptsBlock("__global__")}</div>`;
+    return card;
+  }
+
+  // ── Chat card ─────────────────────────────────────────────────────────────
+
+  function buildChatCard(c) {
+    const card = document.createElement("div");
+    card.className = "chat-card";
+    card.dataset.chatId = c.chatId;
+    card.dataset.name = (c.title || "").toLowerCase();
+    card.dataset.alias = (c.alias || "").toLowerCase();
+
+    const emoji = c.kind === "group" ? "👥" : "👤";
+    const aliasHtml = c.alias ? `<span class="chat-alias-badge">· ${esc(c.alias)}</span>` : "";
+    const ago = timeAgo(c.lastMessageAt);
+
+    card.innerHTML = `
+      <div class="chat-header" onclick="toggleCard(this)">
+        <span class="chat-emoji">${emoji}</span>
+        <div class="chat-info">
+          <div class="chat-name-row">
+            <span class="chat-name">${esc(c.title || c.chatId)}</span>
+            ${aliasHtml}
+          </div>
+          <div class="chat-meta">${esc(c.chatId)}${ago ? " · " + ago : ""}</div>
+        </div>
+        <span class="chat-chevron">▾</span>
+      </div>
+      <div class="chat-body">
+        ${buildProjectBlock(c)}
+        ${buildAliasBlock(c)}
+        ${buildPromptsBlock(c.chatId)}
+      </div>`;
+
+    setTimeout(() => wireProjectSelects(card, c), 0);
+    return card;
+  }
+
+  function toggleCard(header) {
+    const body = header.nextElementSibling;
+    const chev = header.querySelector(".chat-chevron");
+    const isOpen = body.classList.toggle("open");
+    chev.classList.toggle("open", isOpen);
+    if (isOpen) {
+      const chatId = header.closest(".chat-card").dataset.chatId || "__global__";
+      loadSettings(chatId, header.closest(".chat-card"));
+      header.closest(".chat-card").querySelectorAll("textarea").forEach(autoResize);
+    }
+  }
+
+  function toggleBlock(header) {
+    const body = header.nextElementSibling;
+    const collapsed = body.classList.toggle("collapsed");
+    header.classList.toggle("open", !collapsed);
+  }
+
+  // ── Project block ─────────────────────────────────────────────────────────
+
+  function buildProjectBlock(c) {
+    const opts = [`<option value="">— не привязано —</option>`]
+      .concat(allProjects.map(p =>
+        `<option value="${esc(p.id)}" ${p.id === c.boundProjectId ? "selected":""}>${esc(p.name)}</option>`
+      )).join("");
+    return `
+      <div class="block">
+        <div class="block-header open" onclick="toggleBlock(this)">📦 Проект и раздел <span class="bchev">▾</span></div>
+        <div class="block-body">
+          <div class="select-wrap"><select class="proj-sel">${opts}</select></div>
+          <div class="select-wrap sect-wrap" style="display:none"><select class="sect-sel"></select></div>
+          <div class="saved-label"></div>
+        </div>
+      </div>`;
+  }
+
+  function wireProjectSelects(card, c) {
+    const selP = card.querySelector(".proj-sel");
+    const selS = card.querySelector(".sect-sel");
+    const sectWrap = card.querySelector(".sect-wrap");
+    const saved = card.querySelector(".saved-label");
+    if (!selP) return;
+
+    async function loadSections(pid, selectedId) {
+      sectWrap.style.display = "block";
+      selS.innerHTML = `<option>— загрузка… —</option>`;
+      try {
+        const r = await api("/api/sections", {projectId: pid});
+        const secs = r.sections || [];
+        if (!secs.length) { sectWrap.style.display = "none"; return; }
+        selS.innerHTML = `<option value="">— без раздела —</option>` +
+          secs.map(s => `<option value="${esc(s.id)}" ${s.id===selectedId?"selected":""}>${esc(s.name)}</option>`).join("");
+      } catch { sectWrap.style.display = "none"; }
     }
 
-    function bulkSelectKind(kind) {
-      document.querySelectorAll("#bulkList .chat-row-check").forEach(row => {
-        if (row.dataset.kind === kind) {
-          bulkSelected.add(row.dataset.chatId);
-          const box = row.querySelector(".check-box");
-          box.classList.add("checked");
-          box.textContent = "✓";
+    if (c.boundProjectId) loadSections(c.boundProjectId, c.boundSectionId);
+
+    selP.addEventListener("change", async () => {
+      const pid = selP.value;
+      saved.textContent = "Сохраняю…";
+      try {
+        if (pid) {
+          const r = await api("/api/bind", {chatId: c.chatId, projectId: pid});
+          saved.textContent = "✓ " + r.projectName;
+          await loadSections(pid, null);
+        } else {
+          await api("/api/unbind", {chatId: c.chatId});
+          saved.textContent = "Отвязано";
+          sectWrap.style.display = "none";
         }
-      });
-      updateBulkCount();
-    }
-
-    function bulkSelectNone() {
-      bulkSelected.clear();
-      document.querySelectorAll("#bulkList .check-box").forEach(box => {
-        box.classList.remove("checked");
-        box.textContent = "";
-      });
-      updateBulkCount();
-    }
-
-    function closeBulkOverlay() {
-      document.getElementById("bulkOverlay").classList.add("hidden");
-    }
-
-    async function doBulkApply() {
-      if (!bulkSelected.size) { toast("Выбери хотя бы один чат"); return; }
-      try {
-        const r = await api("/api/settings/bulk", {
-          sourceId: bulkSourceId,
-          targetIds: [...bulkSelected],
-        });
-        toast(`Применено к ${r.count} чатам ✓`);
-        closeBulkOverlay();
         tg?.HapticFeedback?.notificationOccurred("success");
-      } catch (e) {
-        toast("Ошибка: " + e.message);
-      }
-    }
+        toast("Сохранено");
+      } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    });
 
-    // ── init ────────────────────────────────────────────────────────────────
-
-    (async () => {
-      $chatList.innerHTML = '<div class="empty-state">Загрузка…</div>';
+    selS.addEventListener("change", async () => {
+      if (!selP.value) return;
+      saved.textContent = "Сохраняю…";
       try {
-        const data = await api("/api/data");
-        allChats = data.chats || [];
-        allProjects = data.projects || [];
-        $chatList.innerHTML = "";
-        await renderAll(data);
-      } catch (e) {
-        $chatList.innerHTML = `<div class="err">Не удалось загрузить.<br>${esc(e.message)}</div>`;
+        const r = await api("/api/bind", {chatId: c.chatId, projectId: selP.value, sectionId: selS.value});
+        saved.textContent = "✓ " + r.projectName + (r.sectionName ? " / " + r.sectionName : "");
+        tg?.HapticFeedback?.notificationOccurred("success");
+        toast("Сохранено");
+      } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    });
+  }
+
+  // ── Alias block ───────────────────────────────────────────────────────────
+
+  function buildAliasBlock(c) {
+    return `
+      <div class="block">
+        <div class="block-header open" onclick="toggleBlock(this)">🏷 Алиас <span class="bchev">▾</span></div>
+        <div class="block-body">
+          <input class="alias-input" type="text" placeholder="Напр.: Алина, Влад, Мама…"
+            data-chat-id="${esc(c.chatId)}" value="${esc(c.alias || "")}" />
+          <div class="field-hint">Автосохранение при потере фокуса · Используется в поиске · Отображается в TickTick</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Prompts block ─────────────────────────────────────────────────────────
+
+  const FIELDS = [
+    {key:"who",          label:"👤 Кто этот человек / о чём чат",     ph:"Напр.: деловой партнёр, вместе ведём автопарк в Лос-Анджелесе"},
+    {key:"topics",       label:"💬 Что обычно обсуждаете",            ph:"Напр.: закупки, платежи, вэны, ремонт, планы поездок"},
+    {key:"task_side",    label:"🎯 Кому ставятся задачи",             ph:"Напр.: задачи в основном мне, он больше информирует и напоминает"},
+    {key:"importance",   label:"⭐ Когда задача важная, а когда нет", ph:"Напр.: важны только задачи с деньгами или дедлайном; бытовые «надо бы» — не важны"},
+    {key:"people",       label:"👥 Кто ещё участвует (имена, роли)",  ph:"Напр.: Коля — прораб, Артём — водитель, Оскар — финансы"},
+    {key:"filter_rules", label:"🔍 Как понять, задача это или нет",   ph:"Напр.: любые упоминания денег и дат — задача, даже если сказано вскользь"},
+    {key:"extract_rules",label:"✍️ Как вытаскивать задачи",          ph:"Напр.: всегда фиксируй сумму; дедлайн считай жёстким, даже если «наверное»"},
+  ];
+
+  function buildPromptsBlock(chatId) {
+    const fields = FIELDS.map(f => `
+      <div class="field-label">${f.label}</div>
+      <textarea placeholder="${esc(f.ph)}" data-field="${f.key}" data-chat-id="${esc(chatId)}" rows="1"></textarea>
+    `).join("");
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">⚙️ Настройки промптов <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          ${fields}
+          <button class="bulk-btn" onclick="openBulk('${esc(chatId)}',event)">📤 Применить к нескольким чатам</button>
+        </div>
+      </div>`;
+  }
+
+  // ── Load & save settings ──────────────────────────────────────────────────
+
+  async function loadSettings(chatId, card) {
+    if (card.dataset.settingsLoaded) return;
+    card.dataset.settingsLoaded = "1";
+    try {
+      const doc = await api(`/api/settings?chatId=${encodeURIComponent(chatId)}`);
+      card.querySelectorAll("textarea[data-field]").forEach(ta => {
+        ta.value = doc[ta.dataset.field] || "";
+        autoResize(ta);
+      });
+      const aliasInput = card.querySelector(".alias-input");
+      if (aliasInput && doc.alias) aliasInput.value = doc.alias;
+    } catch (e) { console.warn("loadSettings failed", chatId, e); }
+
+    card.querySelectorAll("textarea[data-field]").forEach(ta => {
+      ta.addEventListener("input", () => autoResize(ta));
+      ta.addEventListener("blur", () => saveField(ta.dataset.chatId, ta.dataset.field, ta.value));
+    });
+
+    const aliasInput = card.querySelector(".alias-input");
+    if (aliasInput) {
+      aliasInput.addEventListener("blur", async () => {
+        const cid = aliasInput.dataset.chatId;
+        const val = aliasInput.value.trim();
+        await saveField(cid, "alias", val);
+        updateAliasBadge(card, val);
+        card.dataset.alias = val.toLowerCase();
+        toast(val ? `Алиас: ${val}` : "Алиас удалён");
+      });
+    }
+  }
+
+  async function saveField(chatId, field, value) {
+    try {
+      await api("/api/settings", {chatId, [field]: value});
+    } catch (e) { toast("Ошибка сохранения"); }
+  }
+
+  function updateAliasBadge(card, alias) {
+    let badge = card.querySelector(".chat-alias-badge");
+    if (alias) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "chat-alias-badge";
+        card.querySelector(".chat-name-row").appendChild(badge);
       }
-    })();
-  </script>
+      badge.textContent = "· " + alias;
+    } else if (badge) { badge.remove(); }
+  }
+
+  // ── Search ────────────────────────────────────────────────────────────────
+
+  function filterCards() {
+    const q = document.getElementById("searchInput").value.trim().toLowerCase();
+    document.querySelectorAll(".chat-card").forEach(card => {
+      if (!card.dataset.chatId) { card.style.display = ""; return; }
+      const ok = !q || card.dataset.name.includes(q) || card.dataset.alias.includes(q);
+      card.style.display = ok ? "" : "none";
+    });
+    document.querySelectorAll(".section-divider").forEach(div => {
+      let next = div.nextElementSibling, has = false;
+      while (next && !next.classList.contains("section-divider")) {
+        if (next.style.display !== "none") has = true;
+        next = next.nextElementSibling;
+      }
+      div.style.display = has ? "" : "none";
+    });
+  }
+
+  // ── Bulk apply ────────────────────────────────────────────────────────────
+
+  function openBulk(sourceId, e) {
+    e.stopPropagation();
+    bulkSourceId = sourceId;
+    bulkSelected = new Set();
+    const src = allChats.find(c => c.chatId === sourceId);
+    const name = src ? (src.alias || src.title || sourceId) : (sourceId === "__global__" ? "Глобальные" : sourceId);
+    document.getElementById("sheetTitle").textContent = `Применить настройки из «${name}» к:`;
+    document.getElementById("sheetList").innerHTML = allChats.filter(c => c.chatId !== sourceId).map(c => {
+      const emoji = c.kind === "group" ? "👥" : "👤";
+      const label = c.alias ? `${esc(c.alias)} (${esc(c.title)})` : esc(c.title || c.chatId);
+      return `<div class="check-row" onclick="toggleBulk('${esc(c.chatId)}',this)">
+        <div class="check-box" id="chk_${esc(c.chatId)}"></div>
+        <span>${emoji} ${label}</span>
+      </div>`;
+    }).join("");
+    updateApplyBtn();
+    document.getElementById("overlay").classList.add("show");
+  }
+
+  function closeSheet() { document.getElementById("overlay").classList.remove("show"); }
+
+  function toggleBulk(chatId, row) {
+    if (bulkSelected.has(chatId)) bulkSelected.delete(chatId);
+    else bulkSelected.add(chatId);
+    const box = document.getElementById("chk_" + chatId);
+    if (box) { box.classList.toggle("checked", bulkSelected.has(chatId)); box.textContent = bulkSelected.has(chatId) ? "✓" : ""; }
+    updateApplyBtn();
+  }
+
+  function selectQuick(type) {
+    bulkSelected = new Set();
+    allChats.filter(c => c.chatId !== bulkSourceId).forEach(c => {
+      if (type === "all" || (type === "dm" && c.kind === "dm") || (type === "group" && c.kind === "group"))
+        bulkSelected.add(c.chatId);
+    });
+    document.querySelectorAll(".check-box").forEach(box => {
+      const cid = box.id.replace("chk_", "");
+      const on = bulkSelected.has(cid);
+      box.classList.toggle("checked", on); box.textContent = on ? "✓" : "";
+    });
+    updateApplyBtn();
+  }
+
+  function updateApplyBtn() {
+    document.getElementById("sheetApply").textContent = `📤 Применить (${bulkSelected.size})`;
+  }
+
+  document.getElementById("sheetApply").addEventListener("click", async () => {
+    if (!bulkSelected.size) return;
+    try {
+      const r = await api("/api/settings/bulk", {sourceId: bulkSourceId, targetIds: [...bulkSelected]});
+      toast(`✅ Применено к ${r.count} чатам`);
+      document.querySelectorAll(".chat-card").forEach(card => {
+        if (bulkSelected.has(card.dataset.chatId)) delete card.dataset.settingsLoaded;
+      });
+      closeSheet();
+    } catch (e) { toast("Ошибка: " + e.message); }
+  });
+
+  function wireAddButton(botUsername) {
+    if (!botUsername) return;
+    const btn = document.getElementById("addBtn");
+    btn.style.display = "block";
+    btn.addEventListener("click", () => {
+      const link = `https://t.me/${botUsername}?startgroup=true`;
+      if (tg?.openTelegramLink) tg.openTelegramLink(link);
+      else window.open(link, "_blank");
+    });
+  }
+
+  (async () => {
+    try {
+      const data = await api("/api/data");
+      wireAddButton(data.botUsername);
+      render(data);
+    } catch (e) {
+      document.getElementById("content").innerHTML =
+        `<div class="err">Не удалось загрузить.<br>${esc(e.message)}</div>`;
+    }
+  })();
+</script>
 </body>
 </html>
