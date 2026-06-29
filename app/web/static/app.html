@@ -238,11 +238,9 @@
   function render(data) {
     allProjects = data.projects || [];
     // Sort by message count desc, fallback to lastMessageAt
-    allChats = (data.chats || []).sort((a, b) => {
-      const ca = (a.messageCount || 0), cb = (b.messageCount || 0);
-      if (ca !== cb) return cb - ca;
-      return (b.lastMessageAt || "") > (a.lastMessageAt || "") ? 1 : -1;
-    });
+    allChats = (data.chats || []).sort((a, b) =>
+      (b.activityScore || 0) - (a.activityScore || 0)
+    );
 
     const $c = document.getElementById("content");
     if (!allChats.length) {

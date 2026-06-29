@@ -129,7 +129,7 @@ async def api_data(request: web.Request) -> web.Response:
 
     chats = await repo.list_known_chats()
     bindings = {b["chatId"]: b for b in await repo.list_project_bindings()}
-    msg_counts = await repo.count_messages_per_chat()
+    msg_counts = await repo.chat_activity_scores()
     out_chats = []
     for c in chats:
         chat_id = c["chatId"]
@@ -145,10 +145,10 @@ async def api_data(request: web.Request) -> web.Response:
                 "boundSectionName": bindings.get(chat_id, {}).get("sectionName"),
                 "lastMessageAt": last_msg_at.isoformat() if last_msg_at else None,
                 "alias": settings_doc.get("alias") or None,
-                "messageCount": msg_counts.get(chat_id, 0),
+                "activityScore": msg_counts.get(chat_id, 0),
             }
         )
-    out_chats.sort(key=lambda c: c["messageCount"], reverse=True)
+    out_chats.sort(key=lambda c: c["activityScore"], reverse=True)
     return web.json_response(
         {"projects": projects, "chats": out_chats, "botUsername": await _bot_username(request)}
     )

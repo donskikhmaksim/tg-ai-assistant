@@ -60,14 +60,25 @@ async def list_known_chats() -> list[dict[str, Any]]:
     return [d async for d in cursor]
 
 
-async def count_messages_per_chat() -> dict[str, int]:
-    """Return {chatId: message_count} for all chats, using raw_messages aggregation."""
+async def chat_activity_scores() -> dict[str, float]:
+    """Return {chatId: score} where score = msgs_7d*3 + msgs_30d*1."""
+    from datetime import datetime, timedelta, timezone
     db = get_db()
-    pipeline = [{"$group": {"_id": "$chatId", "count": {"$sum": 1}}}]
+    now = datetime.now(timezone.utc)
+    cut7  = now - timedelta(days=7)
+    cut30 = now - timedelta(days=30)
+    pipeline = [
+        {"$match": {"date": {"$gte": cut30}}},
+        {"$group": {
+            "_id": "$chatId",
+            "msgs30": {"$sum": 1},
+            "msgs7":  {"$sum": {"$cond": [{"$gte": ["$date", cut7]}, 1, 0]}},
+        }},
+    ]
     result = {}
     async for doc in db.raw_messages.aggregate(pipeline):
         if doc["_id"]:
-            result[doc["_id"]] = doc["count"]
+            result[doc["_id"]] = doc["msgs7"] * 3 + doc["msgs30"]
     return result
 
 
