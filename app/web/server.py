@@ -129,17 +129,24 @@ async def api_data(request: web.Request) -> web.Response:
 
     chats = await repo.list_known_chats()
     bindings = {b["chatId"]: b for b in await repo.list_project_bindings()}
-    out_chats = [
-        {
-            "chatId": c["chatId"],
-            "title": c.get("title") or c["chatId"],
-            "kind": "group" if c["chatId"].startswith("group_") else "dm",
-            "boundProjectId": bindings.get(c["chatId"], {}).get("ticktickProjectId"),
-            "boundSectionId": bindings.get(c["chatId"], {}).get("ticktickSectionId"),
-            "boundSectionName": bindings.get(c["chatId"], {}).get("sectionName"),
-        }
-        for c in chats
-    ]
+    out_chats = []
+    for c in chats:
+        chat_id = c["chatId"]
+        settings_doc = await repo.get_chat_settings(chat_id)
+        last_msg_at = c.get("lastMessageAt")
+        out_chats.append(
+            {
+                "chatId": chat_id,
+                "title": c.get("title") or chat_id,
+                "kind": "group" if chat_id.startswith("group_") else "dm",
+                "boundProjectId": bindings.get(chat_id, {}).get("ticktickProjectId"),
+                "boundSectionId": bindings.get(chat_id, {}).get("ticktickSectionId"),
+                "boundSectionName": bindings.get(chat_id, {}).get("sectionName"),
+                "lastMessageAt": last_msg_at.isoformat() if last_msg_at else None,
+                "alias": settings_doc.get("alias") or None,
+            }
+        )
+    out_chats.sort(key=lambda c: c["lastMessageAt"] or "", reverse=True)
     return web.json_response(
         {"projects": projects, "chats": out_chats, "botUsername": await _bot_username(request)}
     )
@@ -226,7 +233,7 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
-_SETTINGS_FIELDS = ("who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules")
+_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules")
 
 
 async def api_get_settings(request: web.Request) -> web.Response:

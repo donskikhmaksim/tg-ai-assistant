@@ -294,6 +294,7 @@ async def get_bot_state(key: str) -> Any:
 #
 # Schema:
 #   chatId        str
+#   alias         str | None  — human-friendly short name for the chat (Mini App only)
 #   who           str | None  — who this person is / what the group is about
 #   topics        str | None  — what is usually discussed
 #   task_side     str | None  — who tasks are assigned to
