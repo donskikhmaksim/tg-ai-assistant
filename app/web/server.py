@@ -234,7 +234,9 @@ async def api_get_settings(request: web.Request) -> web.Response:
     await _require_owner(request)
     chat_id = request.rel_url.query.get("chatId", "__global__")
     doc = await repo.get_chat_settings(chat_id)
-    return web.json_response(doc)
+    # Strip non-serializable MongoDB fields (_id, datetimes)
+    safe = {k: v for k, v in doc.items() if k in _SETTINGS_FIELDS}
+    return web.json_response(safe)
 
 
 async def api_save_settings(request: web.Request) -> web.Response:
@@ -270,6 +272,7 @@ def build_app(bot: Any) -> web.Application:
             web.get("/app", serve_app),
             web.get("/chat", serve_chat),
             web.post("/api/data", api_data),
+            web.get("/api/data", api_data),
             web.post("/api/sections", api_sections),
             web.post("/api/bind", api_bind),
             web.post("/api/unbind", api_unbind),
