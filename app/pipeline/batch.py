@@ -193,7 +193,9 @@ async def _create_new_tasks(
     if not new_tasks:
         return
     project_id, project_name, section_id = await _resolve_project(chat_id)
-    source = _source_label(chat_id, await repo.get_chat_title(chat_id))
+    chat_settings = await repo.get_chat_settings(chat_id)
+    display_name = chat_settings.get("alias") or await repo.get_chat_title(chat_id)
+    source = _source_label(chat_id, display_name)
     is_group = chat_id.startswith("group_")
     default_tz = get_settings().default_timezone
     date_by_id = {m["messageId"]: m.get("date") for m in (messages or [])}

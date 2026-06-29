@@ -60,6 +60,17 @@ async def list_known_chats() -> list[dict[str, Any]]:
     return [d async for d in cursor]
 
 
+async def count_messages_per_chat() -> dict[str, int]:
+    """Return {chatId: message_count} for all chats, using raw_messages aggregation."""
+    db = get_db()
+    pipeline = [{"$group": {"_id": "$chatId", "count": {"$sum": 1}}}]
+    result = {}
+    async for doc in db.raw_messages.aggregate(pipeline):
+        if doc["_id"]:
+            result[doc["_id"]] = doc["count"]
+    return result
+
+
 async def get_chat_title(chat_id: str) -> str:
     """Human-readable chat name (group title / DM counterparty), else the id."""
     db = get_db()
