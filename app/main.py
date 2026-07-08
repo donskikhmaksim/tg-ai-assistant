@@ -26,6 +26,11 @@ async def main() -> None:
     settings = get_settings()
     if not settings.bot_token:
         raise SystemExit("BOT_TOKEN is not set")
+    if not settings.ticktick_mcp_url:
+        logger.warning(
+            "TICKTICK_MCP_URL is not set — extracted tasks will be stored locally "
+            "but NOT pushed to TickTick. Deploy your own ticktick-mcp and set the URL."
+        )
 
     await init_db()
     await init_global_defaults()

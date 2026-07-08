@@ -35,8 +35,6 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from .. import github as gh
-
 from .. import repositories as repo
 from ..config import get_settings
 from ..ticktick.mcp_client import get_ticktick
@@ -45,10 +43,6 @@ from .notify import group_watch_announcement
 logger = logging.getLogger(__name__)
 
 router = Router(name="ui")
-
-
-class Onboarding(StatesGroup):
-    waiting_github = State()
 
 
 class ChatSettings(StatesGroup):
@@ -317,21 +311,39 @@ async def cmd_app(message: Message) -> None:
     await message.answer("Открыть управление привязками:", reply_markup=_main_menu())
 
 
-def _deploy_prompt(repo: str) -> str:
+def _deploy_prompt(repo_url: str) -> str:
+    """A paste-ready Claude Code prompt that deploys a fully-isolated instance.
+
+    Everything the new person creates is THEIRS: their own bot, their own
+    MongoDB, their own ticktick-mcp (so tasks go to THEIR TickTick), their own
+    Anthropic key. Nothing points back at the original owner.
+    """
+    repo = repo_url or "the tg-ai-assistant repo"
     return (
-        f"Please help me deploy my own instance of the tg-ai-assistant.\n\n"
-        f"Steps:\n"
-        f"1. Clone the repo: `gh repo clone {repo}`\n"
-        f"2. `cd tg-ai-assistant`\n"
-        f"3. Install Railway CLI if missing: `npm i -g @railway/cli`\n"
-        f"4. `railway login` (browser will open)\n"
-        f"5. `railway init` — create a new project called tg-ai-assistant\n"
-        f"6. Add MongoDB: `railway add --plugin mongodb`\n"
-        f"7. Set required env vars (ask me for the values one by one):\n"
-        f"   BOT_TOKEN, ANTHROPIC_API_KEY, TICKTICK_MCP_URL, MCP_SECRET\n"
-        f"8. `railway up` — deploy\n"
-        f"9. Verify the bot is online by sending /start to it on Telegram\n\n"
-        f"Ask the user for each value you don't know. Do not invent secrets."
+        "Please help me deploy my OWN private instance of tg-ai-assistant on "
+        "Railway. Everything must be mine — I want the original author to have "
+        "no access to my data.\n\n"
+        "Prerequisites (ask me for each; never invent secrets):\n"
+        "- A Telegram bot token from @BotFather (I will create a new bot).\n"
+        "- An Anthropic API key.\n"
+        "- My OWN ticktick-mcp instance. If I don't have one yet, first deploy "
+        "  it from its repo (see its README/ONBOARDING) so I get MY OWN "
+        "  TICKTICK_MCP_URL bound to MY OWN TickTick account. Never reuse a URL "
+        "  someone shared with me.\n\n"
+        "Steps:\n"
+        f"1. Fork/clone {repo} into MY account, then `cd tg-ai-assistant`.\n"
+        "2. `npm i -g @railway/cli` (if missing), then `railway login`.\n"
+        "3. `railway init` — a new project under MY Railway account.\n"
+        "4. `railway add --database mongo` — provision MY own MongoDB.\n"
+        "5. Set env vars (ask me for each value):\n"
+        "   BOT_TOKEN, ANTHROPIC_API_KEY, TICKTICK_MCP_URL (my own),\n"
+        "   MONGO_URL=${{Mongo.MONGO_URL}} (wire it to the Railway Mongo plugin),\n"
+        "   DEFAULT_TIMEZONE (my IANA zone), and WEBAPP_URL once I have the domain.\n"
+        "6. `railway up` — deploy.\n"
+        "7. In @BotFather enable Business/Secretary Mode + turn Group Privacy off, "
+        "   then connect the bot to my account via Telegram Business.\n"
+        "8. Send /start to my bot to confirm it's online.\n\n"
+        "Ask me for each value you don't know. Do not invent secrets."
     )
 
 
@@ -349,80 +361,36 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Non-owner: start onboarding flow.
-    if not s.github_token or not s.github_repo:
-        await message.answer(
-            "👋 Привет! Этот бот можно развернуть у себя.\n\n"
-            "Онбординг пока не настроен владельцем — напиши ему напрямую."
+    # Non-owner: point them at deploying their OWN fully-isolated instance.
+    # The repo is public — no GitHub access, no collaborator invites, no shared
+    # infra. Their bot, their MongoDB, their ticktick-mcp, their data.
+    lines = [
+        "👋 Привет! Хочешь такого же бота — себе?\n",
+        "Он развернётся полностью у тебя: свой бот, своя база, свой TickTick. "
+        "Твои переписки остаются только у тебя — я их не вижу.\n",
+    ]
+    buttons: list[list[InlineKeyboardButton]] = []
+    if s.onboarding_railway_template_url:
+        buttons.append([InlineKeyboardButton(
+            text="🚀 Развернуть на Railway", url=s.onboarding_railway_template_url)])
+    if s.onboarding_repo_url:
+        buttons.append([InlineKeyboardButton(
+            text="📦 Репозиторий и инструкция", url=s.onboarding_repo_url)])
+
+    if s.onboarding_repo_url or s.onboarding_railway_template_url:
+        lines.append(
+            "Проще всего — открой *Claude Code* и вставь этот промпт, он проведёт "
+            "тебя по всем шагам:"
         )
-        return
+        prompt = _deploy_prompt(s.onboarding_repo_url)
+        lines.append(f"```\n{prompt}\n```")
+    else:
+        lines.append("Онбординг пока не настроен владельцем — напиши ему напрямую.")
 
     await message.answer(
-        "👋 Привет! Хочешь поставить себе такого же бота?\n\n"
-        "Он будет работать только на тебя — твои данные у тебя, я их не вижу.\n\n"
-        "Есть ли у тебя аккаунт на GitHub?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да, есть", callback_data="ob:has_github"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="ob:no_github"),
-            ]
-        ]),
-    )
-
-
-@router.callback_query(F.data == "ob:no_github")
-async def onboarding_no_github(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    msg = callback.message
-    if isinstance(msg, Message):
-        await msg.edit_text(
-            "Нужно зарегистрироваться на GitHub — это бесплатно и займёт 2 минуты:\n\n"
-            "1. Зайди на [github.com](https://github.com) → *Sign up*\n"
-            "2. Придумай username (он понадобится на следующем шаге)\n"
-            "3. Вернись сюда и нажми /start",
-            parse_mode="Markdown",
-        )
-
-
-@router.callback_query(F.data == "ob:has_github")
-async def onboarding_has_github(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await state.set_state(Onboarding.waiting_github)
-    msg = callback.message
-    if isinstance(msg, Message):
-        await msg.edit_text(
-            "Отлично! Напиши свой *GitHub username* (то что после github.com/...)",
-            parse_mode="Markdown",
-        )
-
-
-@router.message(Onboarding.waiting_github)
-async def onboarding_github(message: Message, state: FSMContext) -> None:
-    s = get_settings()
-    username = (message.text or "").strip().lstrip("@")
-    if not username or " " in username:
-        await message.answer("Это не похоже на GitHub username. Попробуй ещё раз:")
-        return
-
-    await message.answer(f"⏳ Добавляю @{username} в репозиторий...")
-    try:
-        await gh.add_collaborator(s.github_token, s.github_repo, username)
-    except Exception:
-        logger.exception("GitHub invite failed for %s", username)
-        await message.answer(
-            "❌ Не удалось отправить приглашение. Проверь username и попробуй позже."
-        )
-        return
-
-    await state.clear()
-
-    prompt = _deploy_prompt(s.github_repo)
-    await message.answer(
-        f"✅ Приглашение отправлено на GitHub — прими его по email.\n\n"
-        f"Дальше: открой *Claude Code* на маке и вставь вот этот промпт:\n\n"
-        f"```\n{prompt}\n```\n\n"
-        f"Claude Code сам пройдёт все шаги деплоя. Если застрянешь — пиши сюда.",
+        "\n".join(lines),
         parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
     )
 
 

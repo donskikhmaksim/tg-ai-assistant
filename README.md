@@ -8,7 +8,36 @@ promises**, and creates them in **TickTick** under the right project.
 Processing is **batched, not realtime**. A cheap local Qwen triage gates the
 expensive Claude calls.
 
-Full spec: see the task brief. This README covers running it.
+This is an open, **self-hostable** project: you run your own private instance.
+
+## Deploy your own (private)
+
+Each deploy is **fully isolated**. You bring your own Telegram bot, your own
+MongoDB, your own Anthropic key, and your own `ticktick-mcp` — so your messages
+and tasks stay entirely on your infrastructure. **The original author has zero
+access to anything you deploy.**
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?...)
+
+> Replace the link above with your published Railway template URL
+> (`https://railway.app/new/template?...`). Railway one-click is the recommended
+> path; a docker-compose path for your own VPS is in **[DEPLOY.md](DEPLOY.md)**.
+
+### 1. Your own ticktick-mcp (required first)
+
+The bot writes tasks through a `ticktick-mcp` server, and **that server holds the
+TickTick OAuth tokens — whoever's account it is bound to is where tasks land.**
+So you must deploy your **own** instance before anything else:
+
+1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> (its README +
+   `ONBOARDING` walk you through the `/setup` OAuth flow and generating your
+   `MCP_SECRET`).
+2. Set `TICKTICK_MCP_URL=https://<your-app>.up.railway.app/mcp/<your MCP_SECRET>`.
+
+> ⚠️ **Never point `TICKTICK_MCP_URL` at someone else's ticktick-mcp** — your
+> extracted tasks would be created in *their* TickTick account. It must be yours.
+
+Then follow **[DEPLOY.md](DEPLOY.md)** for the full step-by-step (Railway or VPS).
 
 ## How it works
 
@@ -18,7 +47,7 @@ Telegram
   └─ message           (groups, privacy off)      ─┤→ one bot / one backend
                                                     ↓ save EVERY update immediately
                                         Mongo: raw_messages (TTL 30d, key chatId)
-                                                    ↓ APScheduler, every 30 min
+                                                    ↓ APScheduler, on a debounce
                      for each "dirty" chat → current CONVERSATION WINDOW
                                                     ↓
                      Tier 1 — Qwen (Ollama): any task in the window? yes/no
@@ -64,20 +93,25 @@ cp .env.example .env   # fill in the values
 
 ### TickTick MCP
 
-`TICKTICK_MCP_URL` is the full Streamable-HTTP URL of your Railway
-`ticktick-mcp` deployment, **including the secret path**:
-`https://<app>.up.railway.app/mcp/<MCP_SECRET>`. The backend reuses the tokens
-already configured there — no new TickTick OAuth. Tools used: `get_projects`,
+`TICKTICK_MCP_URL` is the full Streamable-HTTP URL of **your own**
+`ticktick-mcp` deployment (see [step 1 above](#1-your-own-ticktick-mcp-required-first)),
+**including the secret path**: `https://<app>.up.railway.app/mcp/<MCP_SECRET>`.
+The TickTick OAuth tokens live in *that* instance, so it must be one you deployed
+and control — never a URL someone shared with you. Tools used: `get_projects`,
 `create_task`, `complete_task`.
 
-### Qwen (Ollama, local)
+### Qwen (Ollama, optional)
+
+Triage is optional. Run Ollama **wherever you like** (a spare box, a VPS, your
+laptop) and point `QWEN_BASE_URL` at its OpenAI-compatible endpoint (default
+`http://localhost:11434/v1`):
 
 ```bash
 ollama pull qwen2.5:32b-instruct   # 14B fallback if RAM is tight
 ```
 
-Point `QWEN_BASE_URL` at the Ollama OpenAI-compatible endpoint (default
-`http://localhost:11434/v1`).
+If `QWEN_BASE_URL` is unset or unreachable, triage **fails open to Claude** —
+everything still works, it just costs more (no cheap gate in front of Claude).
 
 ## Run
 
@@ -86,31 +120,34 @@ python -m app.main
 ```
 
 Starts the bot (long-polling, incl. `business_*` updates), the Mongo connection,
-and the 30-minute batch scheduler in one process.
+and the debounced batch scheduler in one process.
 
-## Bot usage (Phase 1)
+## Bot usage
 
-No notifications — created tasks just appear in TickTick. The bot is only a
-remote for binding chats to projects.
+No notifications — created tasks just appear in TickTick. The bot is a remote for
+binding chats to projects.
 
 - `/start` — welcome + reply menu (`🔗 Привязать проект`, `📋 Мои привязки`,
   `❌ Отвязать`).
 - In a **group**: `/bind` → pick a project inline → binds that group.
 - `/unbind`, `/bindings` also available.
 
-Binding targets the chat where the command is issued. Per-counterparty DM
-binding is intended for the **Phase-2 WebApp** (mini-app with dropdowns); DM
-message *capture* already works without any binding. Unbound chats still have
-their tasks extracted and stored locally — they sync to TickTick once a project
-is attached.
+Binding targets the chat where the command is issued. DM message *capture* works
+without any binding; unbound chats still have their tasks extracted and stored
+locally, and they sync to TickTick once a project is attached.
+
+Prompt configuration, aliases, and per-chat settings live in the **Mini App**
+(the Telegram menu button, enabled by setting `WEBAPP_URL`).
 
 ## Config
 
 All via env (see `.env.example`): `BOT_TOKEN`, `MONGO_URL`/`MONGO_DB`,
 `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`/`ANTHROPIC_EFFORT`,
-`QWEN_BASE_URL`/`QWEN_MODEL`, `TICKTICK_MCP_URL`, and the pipeline knobs
-`BATCH_INTERVAL_MIN=30`, `CONV_GAP_HOURS=6`, `MAX_LOOKBACK_HOURS=48`,
-`RAW_TTL_DAYS=30`, `DEFAULT_PROJECT=Inbox`.
+`QWEN_BASE_URL`/`QWEN_MODEL`, `TICKTICK_MCP_URL`, `DEFAULT_TIMEZONE`, and the
+pipeline knobs `BATCH_INTERVAL_MIN=2` (+ `QUIET_MINUTES`/`MAX_DIRTY_MINUTES`
+debounce), `CONV_GAP_HOURS=6`, `MAX_LOOKBACK_HOURS=48`, `RAW_TTL_DAYS=30`,
+`DEFAULT_PROJECT=Inbox`. Optional retrieval memory: `EMBED_MODEL` (empty
+disables), `RETRIEVE_TOP_K`, `RETRIEVE_MIN_SCORE`.
 
 ## Data model (MongoDB)
 
@@ -125,11 +162,15 @@ pip install pytest
 pytest            # pure-logic tests: window construction, deadline formatting
 ```
 
-## Deploy (Railway)
+## Deploy
 
-Builds from the `Dockerfile`. Set the env vars in the Railway dashboard. Runs
-alongside the `ticktick-mcp` service. Qwen/Ollama runs locally (e.g. Mac mini);
-expose it to the backend or run the backend where it can reach Ollama.
+Full deployer guide: **[DEPLOY.md](DEPLOY.md)** (Railway one-click, or
+docker-compose on your own VPS).
+
+In short: it builds from the `Dockerfile`; set the env vars in the Railway
+dashboard (or your `.env`). It talks to your own `ticktick-mcp`. Ollama, if you
+use it, runs wherever you host it — expose it to the backend and set
+`QWEN_BASE_URL`, or leave it unset and let triage fail open to Claude.
 
 ## Notes / caveats
 

@@ -12,7 +12,10 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A wall-clock datetime with no offset, e.g. "2026-06-25T17:00" or with a space.
 _LOCAL_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?$")
 
-DEFAULT_TIMEZONE = "America/Los_Angeles"
+# Neutral fallback for direct callers; the production path passes
+# settings.default_timezone explicitly (batch.py). Keep UTC so no owner-specific
+# zone is ever baked in.
+DEFAULT_TIMEZONE = "UTC"
 
 
 def _zone(name: str | None) -> ZoneInfo | None:

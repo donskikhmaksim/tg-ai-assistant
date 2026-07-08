@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ticktick_mcp_url: str = ""
 
     # Pipeline tuning
-    batch_interval_min: int = 30  # scheduler tick; with debounce keep it small (2–3)
+    batch_interval_min: int = 2  # scheduler tick; debounce (quiet_minutes) gates real work
     # Debounce: process a dirty chat only once it's been quiet for quiet_minutes
     # (a settled thought, not mid-conversation), with a max-wait safety so a
     # never-quiet chat is still processed within max_dirty_minutes.
@@ -48,21 +48,26 @@ class Settings(BaseSettings):
     # ("мои", from-Telegram) tasks land in, so they're easy to triage. Resolved
     # to a column id at runtime via list_project_columns; if the column doesn't
     # exist (or the project has no columns), tasks fall to the project root.
-    default_section: str = "TG"
+    # Empty → no column routing. Set it (e.g. "TG") only if your default project
+    # actually has a column with that name.
+    default_section: str = ""
     # Explicit column id for the default section. Set this to bypass the
     # name lookup entirely — required for the built-in Inbox, whose columns the
     # API does NOT list (so default_section by name can't be resolved there).
     # Takes priority over default_section when set.
     default_section_id: str = ""
     # Reference timezone for a deadline that has a clock time but no city/zone
-    # named in the conversation. IANA name. Tasks discussed without a timezone
-    # are interpreted here (the owner's home zone), not UTC.
-    default_timezone: str = "America/Los_Angeles"
+    # named in the conversation. IANA name (e.g. "Europe/Moscow"). Deadlines
+    # discussed without a timezone are interpreted here. Set it to YOUR home
+    # zone; the default is UTC so a fresh deploy never silently offsets times.
+    default_timezone: str = "UTC"
 
-    # Onboarding — GitHub collaborator invite
-    # Fine-grained PAT with repo > collaborators write permission on GITHUB_REPO.
-    github_token: str = ""
-    github_repo: str = ""  # owner/name, e.g. "donskikhmaksim/tg-ai-assistant"
+    # Onboarding (public self-host). The project is a PUBLIC repo and every
+    # person deploys their OWN fully-isolated instance — no secrets or GitHub
+    # access are involved. These just populate the /start message shown to a
+    # non-owner who wants their own bot. Empty → generic "ask the owner" text.
+    onboarding_repo_url: str = ""          # e.g. https://github.com/<owner>/tg-ai-assistant
+    onboarding_railway_template_url: str = ""  # optional "Deploy on Railway" one-click URL
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app

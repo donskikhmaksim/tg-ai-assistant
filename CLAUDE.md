@@ -8,8 +8,8 @@ Telegram AI assistant that reads the owner's conversations — personal DMs
 (incoming **and own outgoing**, via Telegram Business) and groups — and on a
 batched schedule extracts tasks/agreements/promises into TickTick.
 
-Pipeline: capture every update → Mongo → every 30 min build a "conversation
-window" per dirty chat → Qwen triage (local, Ollama) → Claude extraction
+Pipeline: capture every update → Mongo → on a debounce build a "conversation
+window" per dirty chat → Qwen triage (optional, Ollama) → Claude extraction
 (`claude-opus-4-8`, structured output) → dedup → TickTick via MCP. Long-term
 memory (`chat_summary` + open tasks) is separate from the window and survives
 the 30-day raw TTL. Full spec: the original ТЗ (self-contained).
@@ -37,7 +37,7 @@ the 30-day raw TTL. Full spec: the original ТЗ (self-contained).
 ## Status (as of handoff)
 
 Done & verified:
-- Full implementation written, committed, pushed to `claude/untitled-session-v9hk5t`.
+- Full implementation written, committed, pushed.
 - Compiles, imports cleanly in a venv, 8 unit tests pass.
 - Anthropic SDK accepts `output_config`/`thinking`; aiogram dispatcher requests
   `business_*` updates; Railway CLI command syntax verified.
@@ -64,11 +64,11 @@ NOT done yet:
 
 ```bash
 railway login
-railway link                       # project that hosts ticktick-mcp
+railway link                       # your Railway project
 railway add -d mongo
 railway add --service tg-ai-assistant \
-  --repo donskikhmaksim/tg-ai-assistant \
-  --branch claude/untitled-session-v9hk5t
+  --repo <your-org>/<your-fork> \
+  --branch main
 railway variable set -s tg-ai-assistant \
   ANTHROPIC_MODEL=claude-opus-4-8 MONGO_DB=tg_ai_assistant \
   QWEN_MODEL=qwen2.5:32b-instruct QWEN_API_KEY=ollama \
@@ -85,10 +85,10 @@ connected in Telegram) `Business connection … for owner …`.
 
 ## Gotchas
 
-- **Qwen runs locally (Mac mini), backend on Railway can't reach localhost.**
-  Either expose Ollama via Tailscale/Cloudflare/ngrok and set `QWEN_BASE_URL`,
-  or leave it unset — `qwen.has_task()` fails OPEN, so everything goes to Claude
-  (works, just costs more).
+- **Ollama (Qwen triage) is external and optional.** A backend on Railway can't
+  reach a `localhost` Ollama, so either host Ollama somewhere reachable (expose it
+  via Tailscale/Cloudflare/ngrok, etc.) and set `QWEN_BASE_URL`, or leave it unset
+  — `qwen.has_task()` fails OPEN, so everything goes to Claude (works, costs more).
 - **`business_connection` only fires while the backend is running** — if the
   owner-id log never appears, re-add the bot in Telegram → Telegram Business →
   Chatbots after the service is up.
@@ -111,4 +111,13 @@ pytest                 # pure-logic tests
 - Model: always `claude-opus-4-8`. Structured output via `output_config.format`
   (not the deprecated `output_format`). Adaptive thinking + prompt caching on the
   stable system prompt.
-- Keep work on branch `claude/untitled-session-v9hk5t` unless told otherwise.
+- Work on a feature branch off `main`; PR into `main`.
+
+## Onboarding / distribution
+
+This is a **public repo**; every user deploys their OWN fully-isolated instance
+(own bot, own MongoDB, own Anthropic key, own `ticktick-mcp`). The primary path
+is **one-click Railway**, with a docker-compose fallback — see `DEPLOY.md`. There
+is no GitHub-collaborator-invite flow anymore; `ONBOARDING_REPO_URL` /
+`ONBOARDING_RAILWAY_TEMPLATE_URL` only populate the `/start` message a non-owner
+sees. Keep docs deployer-facing and free of any owner-specific values.

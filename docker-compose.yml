@@ -1,0 +1,33 @@
+# Optional self-host path for running on your own VPS (no Railway).
+#
+# The simpler PRIMARY path is one-click Railway — see README / DEPLOY.md.
+# Use this file only if you'd rather run the bot + MongoDB yourself with Docker.
+#
+# This stack runs two services: the bot and a local MongoDB. Everything else the
+# bot talks to (Ollama at QWEN_BASE_URL, the ticktick-mcp server at
+# TICKTICK_MCP_URL) is EXTERNAL — it is not started here. Point the bot at those
+# services by setting their URLs in your .env file.
+#
+# Copy .env.example to .env and fill it in before running `docker compose up -d`.
+
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      # Override so the bot reaches the MongoDB started by this compose stack.
+      - MONGO_URL=mongodb://mongo:27017
+    depends_on:
+      - mongo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
