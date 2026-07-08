@@ -154,13 +154,21 @@ class TickTickMCP:
         due_date: str | None = None,
         section_id: str | None = None,
         is_all_day: bool = False,
+        summary: str | None = None,
     ) -> str | None:
         """Create a task; returns the new TickTick task id (or None if unparsable).
 
         `section_id` is passed through as `column_id` to file the task under a
         project section/column. `is_all_day` marks a date-only deadline as an
-        all-day task (no clock time, no timezone shift)."""
-        args: dict[str, Any] = {"title": title, "project_id": project_id}
+        all-day task (no clock time, no timezone shift). `summary` is REQUIRED by
+        the ticktick-mcp server (a short description of the action) — omitting it
+        makes the server abort the tool call and terminate the MCP session; we
+        default it to the title."""
+        args: dict[str, Any] = {
+            "title": title,
+            "project_id": project_id,
+            "summary": summary or title,
+        }
         if content:
             args["content"] = content
         if due_date:
