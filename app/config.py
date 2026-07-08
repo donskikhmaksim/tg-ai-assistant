@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # TickTick MCP (Railway, Streamable HTTP — full URL incl. secret path)
     ticktick_mcp_url: str = ""
 
+    # Claude via CLI shim (Claude Code subscription on a Mac mini behind a
+    # token-gated Funnel). When claude_cli_url is set, tier-2 extraction runs
+    # through the shim (subscription) instead of the paid Anthropic API, with
+    # NO API fallback — if the shim is unreachable the chat stays dirty and is
+    # retried later. Empty → use the Anthropic API (anthropic_api_key).
+    claude_cli_url: str = ""
+    claude_cli_token: str = ""
+    claude_cli_model: str = "opus"  # Claude Code model alias (opus | sonnet | full id)
+    claude_cli_timeout: int = 300
+
     # Pipeline tuning
     batch_interval_min: int = 2  # scheduler tick; debounce (quiet_minutes) gates real work
     # Debounce: process a dirty chat only once it's been quiet for quiet_minutes

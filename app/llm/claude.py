@@ -17,6 +17,7 @@ import json
 import logging
 from typing import Any
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from ..config import get_settings
@@ -204,6 +205,13 @@ async def extract(
 ) -> dict[str, Any]:
     s = get_settings()
     system = _build_system(chat_context, extract_rules, importance, people)
+    user = _build_user_prompt(window_text, summary, open_tasks, retrieved)
+
+    # Subscription path: run through the CLI shim (claude -p on a Mac mini). No
+    # API fallback — on any failure we raise so the chat stays dirty and retries.
+    if s.claude_cli_url:
+        return await _extract_via_cli(s, system, user)
+
     resp = await _get_client().messages.create(
         model=s.anthropic_model,
         max_tokens=8000,
@@ -213,9 +221,7 @@ async def extract(
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-        messages=[
-            {"role": "user", "content": _build_user_prompt(window_text, summary, open_tasks, retrieved)}
-        ],
+        messages=[{"role": "user", "content": user}],
     )
     # With structured output the model emits a JSON text block (after any thinking
     # blocks). Grab the first text block.
@@ -223,3 +229,48 @@ async def extract(
     if text is None:
         raise ValueError(f"Claude returned no text block (stop_reason={resp.stop_reason})")
     return json.loads(text)
+
+
+# Schema description appended to the CLI prompt — the shim has no json_schema
+# enforcement, so we instruct the model to emit exactly this shape.
+_CLI_OUTPUT_INSTRUCTION = (
+    "\n\n# OUTPUT FORMAT (STRICT)\n"
+    "Return ONLY a single JSON object that validates against this JSON Schema. "
+    "No prose, no explanation, no markdown, no code fences — just the raw JSON object.\n"
+    "JSON Schema:\n" + json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)
+)
+
+
+def _parse_json_loose(text: str) -> dict[str, Any]:
+    """Parse a JSON object from model text that may be fenced or padded."""
+    t = text.strip()
+    if t.startswith("```"):
+        # ```json\n...\n``` or ```\n...\n```
+        t = t[3:]
+        if t[:4].lower() == "json":
+            t = t[4:]
+        t = t.split("```", 1)[0]
+        t = t.strip()
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        i, j = t.find("{"), t.rfind("}")
+        if i >= 0 and j > i:
+            return json.loads(t[i : j + 1])
+        raise
+
+
+async def _extract_via_cli(s: Any, system: str, user: str) -> dict[str, Any]:
+    payload = {
+        "system": system,
+        "prompt": user + _CLI_OUTPUT_INSTRUCTION,
+        "model": s.claude_cli_model,
+    }
+    headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+    async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+        r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
+    return _parse_json_loose(data.get("result") or "")
