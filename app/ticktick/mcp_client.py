@@ -3,12 +3,13 @@
 Transport: Streamable HTTP at the full URL (incl. /mcp/<secret> path).
 The backend is the MCP *client*; Claude never touches MCP directly.
 
-Tool surface (confirmed against the ticktick-mcp source):
+Tool surface (confirmed against the ticktick-mcp source). The server merged the
+singular create/complete tools into array-based ones, so we call those:
   - get_projects() -> formatted text
   - list_project_columns(project_id) -> formatted text   (sections / "разделы")
-  - create_task(title, project_id, content=, due_date=, column_id=, ...) -> text
-  - update_task(task_id, project_id, column_id=, ...) -> formatted text
-  - complete_task(project_id, task_id) -> formatted text
+  - create_tasks(summary, tasks=[{title, project_id, content, due_date, column_id, ...}])
+  - complete_tasks(summary, tasks=[{task_id, project_id}])
+  - update_tasks(summary, tasks=[...])
 
 Sections are TickTick "columns": list them with `list_project_columns` and
 file a task into one by passing `column_id` to create_task. (column_id is a
@@ -146,6 +147,26 @@ class TickTickMCP:
             logger.exception("list_project_columns failed for project %s", project_id)
             return []
 
+    @staticmethod
+    def _task_obj(
+        title: str,
+        project_id: str,
+        content: str | None = None,
+        due_date: str | None = None,
+        section_id: str | None = None,
+        is_all_day: bool = False,
+    ) -> dict[str, Any]:
+        obj: dict[str, Any] = {"title": title, "project_id": project_id}
+        if content:
+            obj["content"] = content
+        if due_date:
+            obj["due_date"] = due_date
+        if is_all_day:
+            obj["is_all_day"] = True
+        if section_id:
+            obj["column_id"] = section_id
+        return obj
+
     async def create_task(
         self,
         title: str,
@@ -156,31 +177,29 @@ class TickTickMCP:
         is_all_day: bool = False,
         summary: str | None = None,
     ) -> str | None:
-        """Create a task; returns the new TickTick task id (or None if unparsable).
+        """Create a single task via the array-based `create_tasks` tool (the
+        singular `create_task` was merged into it). `create_tasks` doesn't return
+        the new id, so this returns None — callers get the id by searching by
+        title when they need it."""
+        task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day)
+        text = await self.call(
+            "create_tasks", {"summary": summary or title, "tasks": [task]}
+        )
+        return _first_id(text)
 
-        `section_id` is passed through as `column_id` to file the task under a
-        project section/column. `is_all_day` marks a date-only deadline as an
-        all-day task (no clock time, no timezone shift). `summary` is REQUIRED by
-        the ticktick-mcp server (a short description of the action) — omitting it
-        makes the server abort the tool call and terminate the MCP session; we
-        default it to the title."""
-        args: dict[str, Any] = {
-            "title": title,
-            "project_id": project_id,
-            "summary": summary or title,
-        }
-        if content:
-            args["content"] = content
-        if due_date:
-            args["due_date"] = due_date
-        if is_all_day:
-            args["is_all_day"] = True
-        if section_id:
-            args["column_id"] = section_id
-        return _first_id(await self.call("create_task", args))
+    async def create_tasks(self, tasks: list[dict[str, Any]], summary: str) -> str:
+        """Create MANY tasks in ONE call. Each item is a task dict from
+        `_task_obj` (title/project_id/content/due_date/column_id/is_all_day).
+        Returns the server's summary text."""
+        return await self.call("create_tasks", {"summary": summary, "tasks": tasks})
 
     async def complete_task(self, project_id: str, task_id: str) -> str:
-        return await self.call("complete_task", {"project_id": project_id, "task_id": task_id})
+        """Complete a single task via the array-based `complete_tasks` tool."""
+        return await self.call(
+            "complete_tasks",
+            {"summary": "Завершение задачи",
+             "tasks": [{"task_id": task_id, "project_id": project_id}]},
+        )
 
 
 _client: TickTickMCP | None = None
