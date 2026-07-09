@@ -63,14 +63,20 @@ In the bot service → **Variables**, set the values from
 | ------------------- | ------------------------------------------------------------ |
 | `BOT_TOKEN`         | your BotFather token                                         |
 | `ANTHROPIC_API_KEY` | your Anthropic key                                           |
-| `TICKTICK_MCP_URL`  | `https://<your-app>.up.railway.app/mcp/<your MCP_SECRET>`    |
 | `MONGO_URL`         | `${{MongoDB.MONGO_URL}}`                                     |
 | `DEFAULT_TIMEZONE`  | your IANA zone, e.g. `Europe/Moscow` (default `UTC`)         |
 | `WEBAPP_URL`        | your service's public https origin (for the Mini App button) |
 
-Optional: `QWEN_BASE_URL` (if you host Ollama), `EMBED_MODEL` (retrieval memory),
-`ONBOARDING_REPO_URL` / `ONBOARDING_RAILWAY_TEMPLATE_URL` (the `/start` message
-shown to non-owners). Railway injects `PORT` automatically.
+That's the whole minimum — three secrets (`BOT_TOKEN`, `ANTHROPIC_API_KEY`,
+`MONGO_URL`) plus your timezone. **TickTick is connected from inside the bot**,
+not via env: after the service is up, DM it `/connect https://<your
+ticktick-mcp>.up.railway.app/mcp/<secret>`. (You can still preset it with the
+`TICKTICK_MCP_URL` env var if you prefer.)
+
+Optional: `QWEN_BASE_URL` (if you host Ollama for the cheap Tier-1 gate — without
+it everything just goes to Claude, which works), `EMBED_MODEL` (retrieval
+memory), `ONBOARDING_REPO_URL` / `ONBOARDING_RAILWAY_TEMPLATE_URL` (the `/start`
+message shown to non-owners). Railway injects `PORT` automatically.
 
 > CLI alternative: the full `railway` CLI runbook is in [CLAUDE.md](CLAUDE.md).
 
@@ -93,6 +99,28 @@ want monitored.
 - Message your bot `/start` — you should get the welcome + reply menu.
 - Send yourself a DM containing a task ("напомни завтра купить молоко") and
   confirm it appears in your TickTick within a few minutes.
+
+### f. Automatic updates (stay current with the maintainer)
+
+Your instance runs your data on your infra, but its **code** can track the
+maintainer's automatically — so you get new features and fixes without doing
+anything:
+
+1. **Deploy from your fork**, not from a manual upload. In the Railway service →
+   **Settings → Source**, connect it to *your* fork's `main` and turn on **Deploy
+   on push**.
+2. In your fork on GitHub, open the **Actions** tab and click **"I understand my
+   workflows, go ahead and enable them"** (GitHub disables Actions on new forks
+   by default).
+
+That's it. The bundled [`Sync from upstream`](.github/workflows/sync-upstream.yml)
+workflow fast-forwards your fork from the maintainer every 30 minutes; each sync
+pushes to your `main`, which triggers a Railway redeploy. You can also trigger it
+on demand: **Actions → Sync from upstream → Run workflow**.
+
+- It only ever fast-forwards **code** — never your env vars, database, or tasks.
+- If you make **local commits** to your fork, it stops auto-syncing (it won't
+  overwrite your changes); merge upstream manually to resume.
 
 ---
 
