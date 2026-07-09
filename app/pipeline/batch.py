@@ -19,7 +19,8 @@ from urllib.parse import quote
 from .. import repositories as repo
 from ..config import get_settings
 from ..llm import claude, qwen
-from ..ticktick.mcp_client import get_ticktick
+from ..onboarding.ticktick_resolve import get_user_ticktick
+from ..ticktick.mcp_client import TickTickMCP
 from ..web.auth import chat_link_token
 from . import retrieve as retrieval
 from .dedup import _zone, is_all_day_deadline, to_ticktick_due
@@ -118,15 +119,27 @@ async def process_chat(chat_id: str) -> None:
     if new_summary:
         await repo.set_summary(chat_id, new_summary)
 
+    # Multi-tenant: route this chat's tasks to ITS owner's own TickTick. No
+    # shared account — a chat whose owner has no connector keeps tasks local.
+    owner = await repo.resolve_chat_owner(chat_id)
+    tt = await get_user_ticktick(owner)
+    if tt is None:
+        logger.info(
+            "Chat %s: owner %s has no TickTick connector — tasks kept local",
+            chat_id, owner,
+        )
+
     smap = await _resolve_section_map(chat_id)
-    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap)
-    await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap)
-    await _route_rejected(chat_id, result.get("rejected", []), messages, smap)
+    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap, tt)
+    await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
+    await _route_rejected(chat_id, result.get("rejected", []), messages, smap, tt)
 
     await repo.mark_processed(chat_id)
 
 
-async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
+async def _resolve_project(
+    chat_id: str, tt: TickTickMCP | None
+) -> tuple[str | None, str, str | None]:
     """Returns (projectId, projectName, sectionId) for a chat's tasks.
 
     Explicit binding wins (and may pin a section/column). Otherwise tasks fall
@@ -134,6 +147,8 @@ async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
     to a real TickTick id so they actually land in an inbox instead of only
     being stored locally. If the default name matches no project, we return
     (None, name, None) and the task stays local until the chat is bound.
+    Remote lookups use THIS owner's `tt` client; without one we can only use
+    binding/env ids and otherwise keep the task local.
     """
     binding = await repo.get_project_binding(chat_id)
     if binding:
@@ -148,19 +163,19 @@ async def _resolve_project(chat_id: str) -> tuple[str | None, str, str | None]:
     # Prefer an explicit id (e.g. the built-in Inbox, which get_projects omits).
     if s.default_project_id:
         pid = s.default_project_id
-        return pid, default_name or "Inbox", await _resolve_default_section(pid)
+        return pid, default_name or "Inbox", await _resolve_default_section(pid, tt)
     # Otherwise resolve the configured default project name to a real id.
-    if default_name:
+    if default_name and tt is not None:
         try:
-            for p in await get_ticktick().get_projects():
+            for p in await tt.get_projects():
                 if p["name"] == default_name:
-                    return p["id"], p["name"], await _resolve_default_section(p["id"])
+                    return p["id"], p["name"], await _resolve_default_section(p["id"], tt)
         except Exception:  # noqa: BLE001
             logger.exception("Default project lookup failed for %r", default_name)
     return None, default_name, None
 
 
-async def _resolve_default_section(project_id: str | None) -> str | None:
+async def _resolve_default_section(project_id: str | None, tt: TickTickMCP | None) -> str | None:
     """Column id of the configured default section inside `project_id`.
 
     Unbound ("мои") tasks land in this section so they're easy to triage.
@@ -172,9 +187,9 @@ async def _resolve_default_section(project_id: str | None) -> str | None:
     if s.default_section_id:
         return s.default_section_id
     name = s.default_section
-    if not name or not project_id:
+    if not name or not project_id or tt is None:
         return None
-    sections = await get_ticktick().get_sections(project_id)
+    sections = await tt.get_sections(project_id)
     # Diagnostic: surface exactly what the server lists for this project, so the
     # column id can be read from logs and pinned via DEFAULT_SECTION_ID.
     logger.info(
@@ -220,11 +235,12 @@ async def _create_new_tasks(
     new_tasks: list[dict[str, Any]],
     messages: list[dict[str, Any]] | None = None,
     smap: dict[str, Any] | None = None,
+    tt: TickTickMCP | None = None,
 ) -> None:
     if not new_tasks:
         return
     smap = smap or {"enabled": False}
-    project_id, project_name, section_id = await _resolve_project(chat_id)
+    project_id, project_name, section_id = await _resolve_project(chat_id, tt)
     # Open (real) tasks ALWAYS fly. If a section is configured for "open", route
     # them there; otherwise keep the default section (never "nowhere").
     open_section = _section_for(smap, "open")
@@ -237,7 +253,6 @@ async def _create_new_tasks(
     default_tz = get_settings().default_timezone
     date_by_id = {m["messageId"]: m.get("date") for m in (messages or [])}
     link = _chat_link(chat_id)
-    tt = get_ticktick()
 
     for t in new_tasks:
         title = (t.get("task") or "").strip()
@@ -265,10 +280,11 @@ async def _create_new_tasks(
             continue
 
         # Push to TickTick. project_id=None means Inbox; we need a real id, so
-        # only create remotely when a project is bound. Unbound tasks are still
-        # recorded locally and can be synced once a project is attached.
-        if project_id is None:
-            logger.info("Chat %s: task stored locally (no project bound): %s", chat_id, title)
+        # only create remotely when a project is bound. No connector (tt is None)
+        # means this owner hasn't connected their TickTick — keep the task local.
+        # Either way the task is recorded locally and can be synced later.
+        if project_id is None or tt is None:
+            logger.info("Chat %s: task stored locally (no project/connector): %s", chat_id, title)
             continue
         try:
             when = _source_time(t.get("source_message_ids"), date_by_id, default_tz)
@@ -369,11 +385,11 @@ def _task_note(
 async def _apply_status_updates(
     chat_id: str, open_tasks: list[dict[str, Any]], updates: list[dict[str, Any]],
     smap: dict[str, Any] | None = None,
+    tt: TickTickMCP | None = None,
 ) -> None:
     if not updates:
         return
     smap = smap or {"enabled": False}
-    tt = get_ticktick()
     for u in updates:
         match = u.get("task_match", "")
         new_status = u.get("new_status")
@@ -391,6 +407,9 @@ async def _apply_status_updates(
         tt_id = task.get("ticktickTaskId")
         project_id = task.get("projectId")
         section = _section_for(smap, new_status)  # done / cancelled column, if configured
+
+        if tt is None:
+            continue  # local status already updated; no connector to sync to
 
         if tt_id and project_id:
             # Already in TickTick: complete it (done). cancelled stays closed
@@ -425,17 +444,17 @@ async def _route_rejected(
     chat_id: str, rejected: list[dict[str, Any]],
     messages: list[dict[str, Any]] | None = None,
     smap: dict[str, Any] | None = None,
+    tt: TickTickMCP | None = None,
 ) -> None:
     """Rejected (junk / false-positive) candidates. Only surfaced to TickTick when
     a 'rejected' section is configured — otherwise they're dropped (default)."""
     smap = smap or {"enabled": False}
     section = _section_for(smap, "rejected")
-    if not section or not rejected:
+    if not section or not rejected or tt is None:
         return
-    project_id, _project_name, _default_section = await _resolve_project(chat_id)
+    project_id, _project_name, _default_section = await _resolve_project(chat_id, tt)
     if not project_id:
         return
-    tt = get_ticktick()
     for r in rejected:
         title = (r.get("task") or "").strip()
         if not title:

@@ -23,13 +23,17 @@ def utcnow() -> datetime:
 # raw_messages + chat_state
 # ---------------------------------------------------------------------------
 
-async def save_raw_message(doc: dict[str, Any], title: str | None = None) -> None:
+async def save_raw_message(
+    doc: dict[str, Any], title: str | None = None, owner_id: str | None = None
+) -> None:
     """Persist a single update atomically, then bump the chat cursor.
 
     Loss is irreversible (Telegram never resends), so this runs before any
     processing. We de-dupe on (chatId, messageId) so re-delivered updates and
     manual reruns don't double-insert. `title` is the human-readable chat name
     (group title or DM counterparty), stored on chat_state for the Mini App.
+    `owner_id` is the tenant this chat belongs to (per-connection owner), stamped
+    on chat_state so the pipeline routes tasks to the right person's TickTick.
     """
     db = get_db()
     await db.raw_messages.update_one(
@@ -37,17 +41,26 @@ async def save_raw_message(doc: dict[str, Any], title: str | None = None) -> Non
         {"$set": doc},
         upsert=True,
     )
-    await touch_chat_state(doc["chatId"], doc["date"], title)
+    await touch_chat_state(doc["chatId"], doc["date"], title, owner_id)
 
 
-async def touch_chat_state(chat_id: str, when: datetime, title: str | None = None) -> None:
+async def touch_chat_state(
+    chat_id: str, when: datetime, title: str | None = None, owner_id: str | None = None
+) -> None:
     db = get_db()
     update: dict[str, Any] = {
         "$max": {"lastMessageAt": when},
         "$setOnInsert": {"chatId": chat_id, "firstSeenAt": when},
     }
+    set_fields: dict[str, Any] = {}
     if title:
-        update["$set"] = {"title": title}
+        set_fields["title"] = title
+    if owner_id:
+        # A chat belongs to exactly one tenant (owner); heal it if it was seen
+        # before we tracked owners.
+        set_fields["ownerId"] = str(owner_id)
+    if set_fields:
+        update["$set"] = set_fields
     await db.chat_state.update_one({"chatId": chat_id}, update, upsert=True)
 
 
@@ -309,6 +322,59 @@ async def get_bot_state(key: str) -> Any:
     db = get_db()
     doc = await db.bot_state.find_one({"key": key})
     return doc["value"] if doc else None
+
+
+# ---------------------------------------------------------------------------
+# business_connections (multi-tenant: each Business connection -> its owner)
+#
+# Schema:
+#   connectionId  str  — Telegram business_connection id (the tenant key on msgs)
+#   ownerId       str  — telegram user id who owns this connection
+#   isEnabled     bool
+#   updatedAt     datetime
+# ---------------------------------------------------------------------------
+
+async def set_business_connection(
+    connection_id: str, owner_id: str, is_enabled: bool = True
+) -> None:
+    db = get_db()
+    await db.business_connections.update_one(
+        {"connectionId": connection_id},
+        {"$set": {
+            "connectionId": connection_id,
+            "ownerId": str(owner_id),
+            "isEnabled": is_enabled,
+            "updatedAt": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+
+async def get_connection_owner(connection_id: str | None) -> str | None:
+    if not connection_id:
+        return None
+    db = get_db()
+    doc = await db.business_connections.find_one(
+        {"connectionId": connection_id}, {"ownerId": 1}
+    )
+    return (doc or {}).get("ownerId")
+
+
+async def resolve_chat_owner(chat_id: str) -> str | None:
+    """Which tenant (owner id) a chat's tasks belong to.
+
+    Prefers the ownerId stamped on chat_state at ingest (per-connection). Falls
+    back to the legacy single global owner (bot_state.owner_id) for chats seen
+    before owner tracking (or groups with no business connection). None only if
+    no owner is known at all.
+    """
+    db = get_db()
+    doc = await db.chat_state.find_one({"chatId": chat_id}, {"ownerId": 1})
+    owner = (doc or {}).get("ownerId")
+    if owner:
+        return str(owner)
+    legacy = await get_bot_state("owner_id")
+    return str(legacy) if legacy is not None else None
 
 
 # ---------------------------------------------------------------------------

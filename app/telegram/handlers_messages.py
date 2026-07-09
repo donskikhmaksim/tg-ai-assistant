@@ -33,7 +33,13 @@ BUSINESS_CONNECTION_KEY = "business_connection_id"
 @router.business_connection()
 async def on_business_connection(conn: BusinessConnection) -> None:
     """Owner connected/updated the bot to their Premium account."""
-    await repo.set_bot_state(OWNER_ID_KEY, conn.user.id)
+    # Multi-tenant: record this connection -> owner mapping.
+    await repo.set_business_connection(conn.id, conn.user.id, conn.is_enabled)
+    # Back-compat: first/primary owner also lives in bot_state (legacy readers,
+    # group fallback, Mini App bootstrap). We only set it once so a second
+    # tenant connecting doesn't hijack the "primary" owner.
+    if await repo.get_bot_state(OWNER_ID_KEY) is None:
+        await repo.set_bot_state(OWNER_ID_KEY, conn.user.id)
     await repo.set_bot_state(BUSINESS_CONNECTION_KEY, conn.id)
     # One-time migration: move the owner's legacy global TickTick URL into their
     # own per-user vault entry, so we can retire the shared/global fallback.
@@ -54,6 +60,15 @@ async def on_business_connection(conn: BusinessConnection) -> None:
 async def _owner_id() -> int | None:
     val = await repo.get_bot_state(OWNER_ID_KEY)
     return int(val) if val is not None else None
+
+
+async def _conn_owner(connection_id: str | None) -> int | None:
+    """Owner of a specific business connection (multi-tenant), falling back to
+    the primary owner for legacy connections not yet in the registry."""
+    owner = await repo.get_connection_owner(connection_id)
+    if owner is not None:
+        return int(owner)
+    return await _owner_id()
 
 
 async def _download(bot: Bot, file_id: str) -> bytes:
@@ -90,7 +105,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if not text:
         return  # nothing to extract from stickers/media-only
 
-    owner_id = await _owner_id()
+    owner_id = await _conn_owner(message.business_connection_id)
     from_id = message.from_user.id if message.from_user else None
     direction = "out" if (owner_id is not None and from_id == owner_id) else "in"
 
@@ -109,6 +124,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             "date": message.date,
         },
         title=message.chat.full_name or message.chat.username,
+        owner_id=str(owner_id) if owner_id is not None else None,
     )
 
 
@@ -127,6 +143,7 @@ async def on_group_message(message: Message, bot: Bot) -> None:
     if not text:
         return
 
+    # Groups carry no business connection; they belong to the primary owner.
     owner_id = await _owner_id()
     from_id = message.from_user.id if message.from_user else None
     direction = "out" if (owner_id is not None and from_id == owner_id) else "in"
@@ -145,6 +162,7 @@ async def on_group_message(message: Message, bot: Bot) -> None:
             "date": message.date,
         },
         title=message.chat.title,
+        owner_id=str(owner_id) if owner_id is not None else None,
     )
 
 
