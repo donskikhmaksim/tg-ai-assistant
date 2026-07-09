@@ -118,8 +118,10 @@ async def process_chat(chat_id: str) -> None:
     if new_summary:
         await repo.set_summary(chat_id, new_summary)
 
-    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages)
-    await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []))
+    smap = await _resolve_section_map(chat_id)
+    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap)
+    await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap)
+    await _route_rejected(chat_id, result.get("rejected", []), messages, smap)
 
     await repo.mark_processed(chat_id)
 
@@ -187,12 +189,47 @@ async def _resolve_default_section(project_id: str | None) -> str | None:
     return None
 
 
+async def _resolve_section_map(chat_id: str) -> dict[str, Any]:
+    """Optional per-category section routing. Returns:
+      {enabled: bool, open|done|cancelled|rejected: {"id","name"} | None}
+    Taken from the chat's section_map, else the global one (whole unit, not
+    field-merged). When disabled, the pipeline keeps its default behavior:
+    open tasks go to the default section, done/cancelled close locally, rejected
+    are dropped."""
+    chat_map = (await repo.get_chat_settings(chat_id)).get("section_map")
+    smap = chat_map or (await repo.get_global_settings()).get("section_map") or {}
+    return {
+        "enabled": bool(smap.get("enabled")),
+        "open": smap.get("open"),
+        "done": smap.get("done"),
+        "cancelled": smap.get("cancelled"),
+        "rejected": smap.get("rejected"),
+    }
+
+
+def _section_for(smap: dict[str, Any], category: str) -> str | None:
+    """The configured column id for a category, or None if unset/disabled."""
+    if not smap.get("enabled"):
+        return None
+    entry = smap.get(category)
+    return (entry or {}).get("id")
+
+
 async def _create_new_tasks(
-    chat_id: str, new_tasks: list[dict[str, Any]], messages: list[dict[str, Any]] | None = None
+    chat_id: str,
+    new_tasks: list[dict[str, Any]],
+    messages: list[dict[str, Any]] | None = None,
+    smap: dict[str, Any] | None = None,
 ) -> None:
     if not new_tasks:
         return
+    smap = smap or {"enabled": False}
     project_id, project_name, section_id = await _resolve_project(chat_id)
+    # Open (real) tasks ALWAYS fly. If a section is configured for "open", route
+    # them there; otherwise keep the default section (never "nowhere").
+    open_section = _section_for(smap, "open")
+    if open_section:
+        section_id = open_section
     chat_settings = await repo.get_chat_settings(chat_id)
     display_name = chat_settings.get("alias") or await repo.get_chat_title(chat_id)
     source = _source_label(chat_id, display_name)
@@ -330,10 +367,12 @@ def _task_note(
 
 
 async def _apply_status_updates(
-    chat_id: str, open_tasks: list[dict[str, Any]], updates: list[dict[str, Any]]
+    chat_id: str, open_tasks: list[dict[str, Any]], updates: list[dict[str, Any]],
+    smap: dict[str, Any] | None = None,
 ) -> None:
     if not updates:
         return
+    smap = smap or {"enabled": False}
     tt = get_ticktick()
     for u in updates:
         match = u.get("task_match", "")
@@ -349,16 +388,67 @@ async def _apply_status_updates(
         if not updated:
             continue
 
-        # Reflect completion in TickTick (cancelled tasks are just closed locally
-        # unless we also want to complete them remotely — we complete `done` only).
         tt_id = task.get("ticktickTaskId")
         project_id = task.get("projectId")
-        if new_status == "done" and tt_id and project_id:
+        section = _section_for(smap, new_status)  # done / cancelled column, if configured
+
+        if tt_id and project_id:
+            # Already in TickTick: complete it (done). cancelled stays closed
+            # locally unless a section is configured (then we complete it too so
+            # it lands as closed in the archive column via a later move — for now
+            # we just complete `done`, matching prior behavior).
+            if new_status == "done":
+                try:
+                    await tt.complete_task(project_id=project_id, task_id=tt_id)
+                    logger.info("Chat %s: completed TickTick task '%s'", chat_id, task["task"])
+                except Exception:  # noqa: BLE001
+                    logger.exception("Chat %s: TickTick complete_task failed", chat_id)
+        elif section and project_id:
+            # Never pushed, but a section is configured for this category → archive
+            # it there so nothing is silently lost. Create then complete (done).
             try:
-                await tt.complete_task(project_id=project_id, task_id=tt_id)
-                logger.info("Chat %s: completed TickTick task '%s'", chat_id, task["task"])
+                note = f"[{new_status}] {task.get('details') or ''}".strip()
+                new_id = await tt.create_task(
+                    title=task["task"], project_id=project_id,
+                    content=note or None, section_id=section,
+                )
+                if new_status == "done" and new_id:
+                    await tt.complete_task(project_id=project_id, task_id=new_id)
+                logger.info("Chat %s: archived %s task '%s' to section %s",
+                            chat_id, new_status, task["task"], section)
             except Exception:  # noqa: BLE001
-                logger.exception("Chat %s: TickTick complete_task failed", chat_id)
+                logger.exception("Chat %s: archive of %s task failed", chat_id, new_status)
+        # else: no tt_id and no configured section → close locally only (default).
+
+
+async def _route_rejected(
+    chat_id: str, rejected: list[dict[str, Any]],
+    messages: list[dict[str, Any]] | None = None,
+    smap: dict[str, Any] | None = None,
+) -> None:
+    """Rejected (junk / false-positive) candidates. Only surfaced to TickTick when
+    a 'rejected' section is configured — otherwise they're dropped (default)."""
+    smap = smap or {"enabled": False}
+    section = _section_for(smap, "rejected")
+    if not section or not rejected:
+        return
+    project_id, _project_name, _default_section = await _resolve_project(chat_id)
+    if not project_id:
+        return
+    tt = get_ticktick()
+    for r in rejected:
+        title = (r.get("task") or "").strip()
+        if not title:
+            continue
+        try:
+            await tt.create_task(
+                title=title, project_id=project_id,
+                content=f"Отклонено: {r.get('reason', '')}".strip(),
+                section_id=section,
+            )
+            logger.info("Chat %s: routed rejected item '%s' to review section", chat_id, title)
+        except Exception:  # noqa: BLE001
+            logger.exception("Chat %s: routing rejected item failed", chat_id)
 
 
 def _match_open_task(match: str, open_tasks: list[dict[str, Any]]) -> dict[str, Any] | None:

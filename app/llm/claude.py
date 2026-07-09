@@ -65,6 +65,10 @@ TIER2_DEFAULT_SYSTEM = (
     "rather than echoing the confusion.\n"
     "  - status_updates: for existing open tasks that later messages show as completed "
     "or cancelled, reference the task by its text and give new_status done|cancelled.\n"
+    "  - rejected: borderline candidates you considered but decided are NOT real tasks "
+    "(noise, small talk, hypotheticals, duplicates of obvious things). Give the candidate "
+    "text and a one-line reason. Keep this SHORT — only genuinely ambiguous near-misses, "
+    "not every message. This lets the user optionally review what was filtered out.\n"
     "  - updated_summary: a COMPACT, STRUCTURED memory of the whole chat — short labeled "
     "lines, not prose. Cover: people & roles, key facts/preferences, decisions, open "
     "threads/questions, who owes whom. MERGE this window into the prior summary: keep it "
@@ -123,9 +127,25 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "rejected": {
+            "type": "array",
+            "description": "Items that looked like a task but you decided are NOT "
+            "real tasks (noise, chit-chat, already-obvious, false positives). "
+            "Each has the candidate text and a short reason.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "source_message_ids": {"type": "array", "items": {"type": "integer"}},
+                },
+                "required": ["task", "reason", "source_message_ids"],
+                "additionalProperties": False,
+            },
+        },
         "updated_summary": {"type": "string"},
     },
-    "required": ["new_tasks", "status_updates", "updated_summary"],
+    "required": ["new_tasks", "status_updates", "rejected", "updated_summary"],
     "additionalProperties": False,
 }
 
