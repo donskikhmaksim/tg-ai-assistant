@@ -35,6 +35,14 @@ async def on_business_connection(conn: BusinessConnection) -> None:
     """Owner connected/updated the bot to their Premium account."""
     await repo.set_bot_state(OWNER_ID_KEY, conn.user.id)
     await repo.set_bot_state(BUSINESS_CONNECTION_KEY, conn.id)
+    # One-time migration: move the owner's legacy global TickTick URL into their
+    # own per-user vault entry, so we can retire the shared/global fallback.
+    try:
+        from ..onboarding.ticktick_resolve import seed_owner_from_env
+
+        await seed_owner_from_env(str(conn.user.id))
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to seed owner TickTick URL into vault")
     logger.info(
         "Business connection %s for owner %s (enabled=%s)",
         conn.id,
