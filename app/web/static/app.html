@@ -317,11 +317,12 @@
       </div>
       <div class="chat-body">
         ${buildProjectBlock(c)}
+        ${buildSectionRoutingBlock(c)}
         ${buildAliasBlock(c)}
         ${buildPromptsBlock(c.chatId)}
       </div>`;
 
-    setTimeout(() => wireProjectSelects(card, c), 0);
+    setTimeout(() => { wireProjectSelects(card, c); wireSectionRouting(card, c); }, 0);
     return card;
   }
 
@@ -410,6 +411,94 @@
         toast("Сохранено");
       } catch (e) { saved.textContent = "Ошибка: " + e.message; }
     });
+  }
+
+  // ── Section routing block (optional per-category → column) ─────────────────
+
+  const SR_CATS = [
+    {cat:"open",      label:"✅ Реальные задачи (летят всегда)"},
+    {cat:"done",      label:"☑️ Выполнено"},
+    {cat:"cancelled", label:"🚫 Отменено"},
+    {cat:"rejected",  label:"🗑 Брак / мусор"},
+  ];
+
+  function buildSectionRoutingBlock(c) {
+    const rows = SR_CATS.map(x => `
+      <div class="field-label">${x.label}</div>
+      <div class="select-wrap"><select class="sr-sel" data-cat="${x.cat}"></select></div>
+    `).join("");
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">🗂 Разнести по разделам <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:14px">
+            <input type="checkbox" class="sr-enabled"> Включить разнесение по разделам
+          </label>
+          <div class="sr-fields" style="display:none">
+            ${rows}
+            <div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">
+              Не выбрал раздел — эта категория никуда не летит (кроме реальных задач:
+              они летят всегда, в дефолтный раздел).
+            </div>
+          </div>
+          <div class="sr-noproj" style="display:none;font-size:13px;color:var(--muted)">
+            Сначала привяжи проект в блоке выше.
+          </div>
+        </div>
+      </div>`;
+  }
+
+  async function wireSectionRouting(card, c) {
+    const chatId = c.chatId || "__global__";
+    const enabledCb = card.querySelector(".sr-enabled");
+    const fields = card.querySelector(".sr-fields");
+    const noproj = card.querySelector(".sr-noproj");
+    if (!enabledCb) return;
+    const selects = [...card.querySelectorAll(".sr-sel")];
+    const pid = c.boundProjectId;
+
+    let smap = {};
+    try {
+      const doc = await api(`/api/settings?chatId=${encodeURIComponent(chatId)}`);
+      smap = doc.section_map || {};
+    } catch {}
+
+    async function populate() {
+      if (!pid) { fields.style.display = "none"; noproj.style.display = "block"; return; }
+      noproj.style.display = "none"; fields.style.display = "block";
+      let secs = [];
+      try { secs = (await api("/api/sections", {projectId: pid})).sections || []; } catch {}
+      selects.forEach(sel => {
+        const cur = (smap[sel.dataset.cat] || {}).id || "";
+        sel.innerHTML = `<option value="">— не выбрано —</option>` +
+          secs.map(s => `<option value="${esc(s.id)}" data-name="${esc(s.name)}" ${s.id===cur?"selected":""}>${esc(s.name)}</option>`).join("");
+      });
+    }
+
+    function currentMap() {
+      const m = { enabled: enabledCb.checked };
+      selects.forEach(sel => {
+        const opt = sel.selectedOptions[0];
+        m[sel.dataset.cat] = sel.value ? { id: sel.value, name: opt?.dataset.name || "" } : null;
+      });
+      return m;
+    }
+
+    async function save() {
+      try { await api("/api/settings", { chatId, section_map: currentMap() }); toast("Сохранено"); }
+      catch { toast("Ошибка сохранения"); }
+    }
+
+    enabledCb.checked = !!smap.enabled;
+    if (enabledCb.checked) await populate();
+    else { fields.style.display = "none"; noproj.style.display = "none"; }
+
+    enabledCb.addEventListener("change", async () => {
+      if (enabledCb.checked) await populate();
+      else { fields.style.display = "none"; noproj.style.display = "none"; }
+      await save();
+    });
+    selects.forEach(sel => sel.addEventListener("change", save));
   }
 
   // ── Alias block ───────────────────────────────────────────────────────────
