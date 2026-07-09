@@ -65,8 +65,16 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase, raw_ttl_seconds: int) -> Non
     )
     await db.chat_project_map.create_index([("chatId", ASCENDING)], unique=True)
     await db.chat_state.create_index([("chatId", ASCENDING)], unique=True)
+    await db.chat_state.create_index([("ownerId", ASCENDING)])  # tenant chat lists
     await db.chat_summary.create_index([("chatId", ASCENDING)], unique=True)
     await db.bot_state.create_index([("key", ASCENDING)], unique=True)
+    # Multi-tenant: connection->owner registry + per-user encrypted vault.
+    await db.business_connections.create_index([("connectionId", ASCENDING)], unique=True)
+    await db.business_connections.create_index([("ownerId", ASCENDING)])
+    await db.user_credentials.create_index(
+        [("userId", ASCENDING), ("provider", ASCENDING), ("label", ASCENDING)],
+        unique=True, name="user_provider_label",
+    )
     # Permanent embedding archive for retrieval (NO TTL — survives raw expiry).
     await db.message_vectors.create_index(
         [("chatId", ASCENDING), ("messageId", ASCENDING)], unique=True

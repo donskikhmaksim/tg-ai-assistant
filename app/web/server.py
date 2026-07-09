@@ -21,8 +21,9 @@ from aiohttp import web
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..onboarding.ticktick_resolve import get_user_ticktick
 from ..telegram.notify import group_watch_announcement
-from ..ticktick.mcp_client import get_ticktick
+from ..ticktick.mcp_client import TickTickMCP
 from .auth import validate_init_data, verify_chat_token
 
 logger = logging.getLogger(__name__)
@@ -36,13 +37,32 @@ async def _require_owner(request: web.Request) -> dict[str, Any]:
     data = validate_init_data(init_data, get_settings().bot_token)
     if not data:
         raise web.HTTPUnauthorized(text="invalid initData")
-    owner_id = await repo.get_bot_state(OWNER_ID_KEY)
+    # Multi-tenant: any user with a registered Business connection is a valid
+    # tenant and manages ONLY their own chats/TickTick. Before any owner is
+    # known (fresh bot), any validly-signed user may bootstrap as primary owner.
     uid = data["user"].get("id")
-    # Enforce owner-only once we know the owner; before that (bot never
-    # connected to Business yet) any validly-signed user is allowed to bootstrap.
-    if owner_id is not None and uid != int(owner_id):
-        raise web.HTTPForbidden(text="not the owner")
+    if not await _is_known_tenant(uid):
+        raise web.HTTPForbidden(text="not a connected tenant")
     return data
+
+
+async def _is_known_tenant(uid: int | None) -> bool:
+    """True if this user owns a Business connection (multi-tenant) or is the
+    legacy primary owner, or no owner is known yet (bootstrap)."""
+    if uid is None:
+        return False
+    primary = await repo.get_bot_state(OWNER_ID_KEY)
+    if primary is None:
+        return True  # fresh bot — allow bootstrap
+    if int(primary) == uid:
+        return True
+    return await repo.get_owner_connection_count(str(uid)) > 0
+
+
+async def _tt_for(data: dict[str, Any]) -> TickTickMCP | None:
+    """The requesting tenant's own TickTick client (or None if not connected)."""
+    uid = data["user"].get("id")
+    return await get_user_ticktick(str(uid)) if uid is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -120,14 +140,24 @@ _CHAT_TEMPLATE = """<!DOCTYPE html>
 
 
 async def api_data(request: web.Request) -> web.Response:
-    await _require_owner(request)
-    try:
-        projects = await get_ticktick().get_projects()
-    except Exception:  # noqa: BLE001
-        logger.exception("get_projects failed")
-        return web.json_response({"error": "ticktick_unreachable"}, status=502)
+    data = await _require_owner(request)
+    uid = data["user"].get("id")
+    tt = await _tt_for(data)
 
-    chats = await repo.list_known_chats()
+    # A tenant sees only their own chats. The primary owner also sees legacy /
+    # group chats with no owner stamped yet, so nothing vanishes mid-migration.
+    primary = await repo.get_bot_state(OWNER_ID_KEY)
+    is_primary = primary is not None and uid == int(primary)
+
+    projects: list[Any] = []
+    if tt is not None:
+        try:
+            projects = await tt.get_projects()
+        except Exception:  # noqa: BLE001
+            logger.exception("get_projects failed")
+            return web.json_response({"error": "ticktick_unreachable"}, status=502)
+
+    chats = await repo.list_known_chats(owner_id=str(uid), include_unowned=is_primary)
     bindings = {b["chatId"]: b for b in await repo.list_project_bindings()}
     msg_counts = await repo.chat_activity_scores()
     out_chats = []
@@ -150,19 +180,27 @@ async def api_data(request: web.Request) -> web.Response:
         )
     out_chats.sort(key=lambda c: c["activityScore"], reverse=True)
     return web.json_response(
-        {"projects": projects, "chats": out_chats, "botUsername": await _bot_username(request)}
+        {
+            "projects": projects,
+            "chats": out_chats,
+            "botUsername": await _bot_username(request),
+            "needsTickTick": tt is None,
+        }
     )
 
 
 async def api_sections(request: web.Request) -> web.Response:
     """List a project's sections (columns) for the section picker."""
-    await _require_owner(request)
+    data = await _require_owner(request)
+    tt = await _tt_for(data)
+    if tt is None:
+        return web.json_response({"error": "ticktick_not_connected"}, status=409)
     body = await request.json()
     project_id = (body or {}).get("projectId")
     if not project_id:
         return web.json_response({"error": "projectId required"}, status=400)
     try:
-        sections = await get_ticktick().get_sections(project_id)
+        sections = await tt.get_sections(project_id)
     except Exception:  # noqa: BLE001
         logger.exception("get_sections failed")
         return web.json_response({"error": "ticktick_unreachable"}, status=502)
@@ -183,7 +221,10 @@ async def _bot_username(request: web.Request) -> str:
 
 
 async def api_bind(request: web.Request) -> web.Response:
-    await _require_owner(request)
+    data = await _require_owner(request)
+    tt = await _tt_for(data)
+    if tt is None:
+        return web.json_response({"error": "ticktick_not_connected"}, status=409)
     body = await request.json()
     chat_id = (body or {}).get("chatId")
     project_id = (body or {}).get("projectId")
@@ -192,7 +233,7 @@ async def api_bind(request: web.Request) -> web.Response:
         return web.json_response({"error": "chatId and projectId required"}, status=400)
 
     # Resolve the project name so bindings stay readable without a TickTick call.
-    projects = await get_ticktick().get_projects()
+    projects = await tt.get_projects()
     name = next((p["name"] for p in projects if p["id"] == project_id), "")
     if not name:
         return web.json_response({"error": "unknown project"}, status=400)
@@ -201,7 +242,7 @@ async def api_bind(request: web.Request) -> web.Response:
     section_name = None
     if section_id:
         try:
-            for s in await get_ticktick().get_sections(project_id):
+            for s in await tt.get_sections(project_id):
                 if s["id"] == section_id:
                     section_name = s["name"]
                     break

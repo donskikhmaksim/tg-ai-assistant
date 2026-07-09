@@ -37,7 +37,7 @@ from aiogram.types import (
 
 from .. import repositories as repo
 from ..config import get_settings
-from ..ticktick.mcp_client import get_ticktick
+from ..onboarding.ticktick_resolve import get_user_ticktick, set_user_mcp_url
 from .notify import group_watch_announcement
 
 logger = logging.getLogger(__name__)
@@ -88,43 +88,77 @@ def _main_menu() -> ReplyKeyboardMarkup:
 # ---------------------------------------------------------------------------
 
 async def _is_owner(user_id: int | None) -> bool:
-    """True if the actor is the owner. Until the owner is known (Business not yet
-    connected) we don't block, so first-time setup isn't locked out."""
+    """True if the actor is the primary owner. Until the owner is known (Business
+    not yet connected) we don't block, so first-time setup isn't locked out."""
     owner = await repo.get_bot_state("owner_id")
     if owner is None:
         return True
     return user_id is not None and int(owner) == int(user_id)
 
 
+async def _is_tenant(user_id: int | None) -> bool:
+    """True if the actor is a tenant of this bot: the primary owner, or a user
+    who has connected their own Business account. Before any owner is known we
+    don't block (bootstrap). Non-tenants get the onboarding invite instead of
+    the management menu."""
+    if await _is_owner(user_id):
+        return True
+    if user_id is None:
+        return False
+    return await repo.get_owner_connection_count(str(user_id)) > 0
+
+
+async def _is_chat_owner(user_id: int | None, chat_key: str) -> bool:
+    """True if the actor owns THIS chat (its tasks route to their TickTick).
+    Groups (and legacy chats) fall back to the primary owner."""
+    if user_id is None:
+        return False
+    owner = await repo.resolve_chat_owner(chat_key)
+    if owner is None:
+        return True  # no owner known yet — allow bootstrap
+    return str(owner) == str(user_id)
+
+
 # ---------------------------------------------------------------------------
 # TickTick lookups (best-effort — never raise into a handler).
 # ---------------------------------------------------------------------------
 
-async def _safe_projects() -> list[dict[str, str]]:
+async def _tt(user_id: int | None):
+    """The actor's own TickTick client (multi-tenant), or None if not connected."""
+    return await get_user_ticktick(str(user_id)) if user_id is not None else None
+
+
+async def _safe_projects(user_id: int | None) -> list[dict[str, str]]:
+    tt = await _tt(user_id)
+    if tt is None:
+        return []
     try:
-        return await get_ticktick().get_projects()
+        return await tt.get_projects()
     except Exception:  # noqa: BLE001
         logger.exception("get_projects failed")
         return []
 
 
-async def _safe_sections(project_id: str) -> list[dict[str, str]]:
+async def _safe_sections(user_id: int | None, project_id: str) -> list[dict[str, str]]:
+    tt = await _tt(user_id)
+    if tt is None:
+        return []
     try:
-        return await get_ticktick().get_sections(project_id)
+        return await tt.get_sections(project_id)
     except Exception:  # noqa: BLE001
         logger.exception("get_sections failed")
         return []
 
 
-async def _project_name(project_id: str) -> str:
-    for p in await _safe_projects():
+async def _project_name(user_id: int | None, project_id: str) -> str:
+    for p in await _safe_projects(user_id):
         if p["id"] == project_id:
             return p["name"]
     return project_id
 
 
-async def _section_name(project_id: str, section_id: str) -> str:
-    for s in await _safe_sections(project_id):
+async def _section_name(user_id: int | None, project_id: str, section_id: str) -> str:
+    for s in await _safe_sections(user_id, project_id):
         if s["id"] == section_id:
             return s["name"]
     return section_id
@@ -187,14 +221,15 @@ async def _safe_edit(
         logger.debug("edit_text failed", exc_info=True)
 
 
-async def _send_project_picker(bot: Bot, chat_id: int) -> None:
-    """Post the project picker into the given chat (group or DM)."""
-    projects = await _safe_projects()
+async def _send_project_picker(bot: Bot, chat_id: int, user_id: int | None) -> None:
+    """Post the project picker into the given chat (group or DM), using the
+    actor's own TickTick projects."""
+    projects = await _safe_projects(user_id)
     if not projects:
         await bot.send_message(
             chat_id,
-            "Не вижу проектов в TickTick (или не настроен TICKTICK_MCP_URL). "
-            "Когда починится — нажми /bind.",
+            "Не вижу проектов в твоём TickTick. Подключи свой коннектор командой "
+            "/connect <url>, потом нажми /bind.",
         )
         return
     await bot.send_message(
@@ -222,7 +257,8 @@ async def on_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
         await bot.send_message(chat.id, _welcome_text(me.full_name))
     except Exception:  # noqa: BLE001
         logger.exception("Failed to send welcome to group %s", chat_id)
-    await _send_project_picker(bot, chat.id)
+    actor = event.from_user.id if event.from_user else None
+    await _send_project_picker(bot, chat.id, actor)
 
 
 # ---------------------------------------------------------------------------
@@ -232,28 +268,29 @@ async def on_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
 @router.message(Command("bind"))
 @router.message(F.text == BTN_BIND)
 async def start_bind(message: Message) -> None:
+    actor = message.from_user.id if message.from_user else None
     if message.chat.type in ("group", "supergroup"):
-        actor = message.from_user.id if message.from_user else None
-        if not await _is_owner(actor):
-            return  # someone else's /bind in a group — ignore silently
-    await _send_project_picker(message.bot, message.chat.id)
+        if not await _is_chat_owner(actor, f"group_{message.chat.id}"):
+            return  # only the group's owner may bind it
+    await _send_project_picker(message.bot, message.chat.id, actor)
 
 
 @router.callback_query(F.data.startswith("pp:"))
 async def on_pick_project(callback: CallbackQuery) -> None:
     if not callback.data:
         return
-    if not await _is_owner(callback.from_user.id):
-        await callback.answer("Выбирать проект может только владелец.", show_alert=True)
-        return
     chat_key = _chat_key_from_callback(callback)
     if chat_key is None:
         await callback.answer("Не понял чат.", show_alert=True)
         return
+    if not await _is_chat_owner(callback.from_user.id, chat_key):
+        await callback.answer("Выбирать проект может только владелец чата.", show_alert=True)
+        return
 
     project_id = callback.data.split(":", 1)[1]
-    project_name = await _project_name(project_id)
-    sections = await _safe_sections(project_id)
+    actor = callback.from_user.id
+    project_name = await _project_name(actor, project_id)
+    sections = await _safe_sections(actor, project_id)
 
     if not sections:
         # No sections on this project — bind right away.
@@ -275,16 +312,17 @@ async def on_pick_project(callback: CallbackQuery) -> None:
 async def on_pick_section(callback: CallbackQuery) -> None:
     if not callback.data:
         return
-    if not await _is_owner(callback.from_user.id):
-        await callback.answer("Выбирать раздел может только владелец.", show_alert=True)
-        return
     chat_key = _chat_key_from_callback(callback)
     if chat_key is None:
         await callback.answer("Не понял чат.", show_alert=True)
         return
+    if not await _is_chat_owner(callback.from_user.id, chat_key):
+        await callback.answer("Выбирать раздел может только владелец чата.", show_alert=True)
+        return
 
     _, project_id, section_id = callback.data.split(":", 2)
-    project_name = await _project_name(project_id)
+    actor = callback.from_user.id
+    project_name = await _project_name(actor, project_id)
 
     if section_id == "none":
         await repo.set_project_binding(chat_key, project_id, project_name)
@@ -292,7 +330,7 @@ async def on_pick_section(callback: CallbackQuery) -> None:
         await _confirm_bind(callback, chat_key, project_name)
         return
 
-    section_name = await _section_name(project_id, section_id)
+    section_name = await _section_name(actor, project_id, section_id)
     await repo.set_project_binding(chat_key, project_id, project_name, section_id, section_name)
     await callback.answer("Привязано ✅")
     await _confirm_bind(callback, chat_key, project_name, section_name)
@@ -301,6 +339,53 @@ async def on_pick_section(callback: CallbackQuery) -> None:
 # ---------------------------------------------------------------------------
 # Misc commands / menu.
 # ---------------------------------------------------------------------------
+
+@router.message(Command("connect"))
+async def cmd_connect(message: Message) -> None:
+    """Register the CALLER's own ticktick-mcp connector URL (multi-tenant).
+
+    The URL is itself the credential, so we best-effort delete the command
+    message after storing it, and verify the connector actually answers.
+    """
+    uid = message.from_user.id if message.from_user else None
+    if uid is None:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    url = parts[1].strip() if len(parts) > 1 else ""
+    if not url or "/mcp/" not in url:
+        await message.answer(
+            "Пришли свой личный адрес ticktick-mcp так:\n"
+            "`/connect https://<твой>.up.railway.app/mcp/<секрет>`\n\n"
+            "Это твой персональный коннектор — задачи полетят в ТВОЙ TickTick, "
+            "ни в чей другой.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await set_user_mcp_url(str(uid), url)
+    # The URL is a secret — don't leave it sitting in the chat.
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        logger.debug("could not delete /connect message", exc_info=True)
+
+    ok = False
+    try:
+        tt = await get_user_ticktick(str(uid))
+        if tt is not None:
+            await tt.get_projects()
+            ok = True
+    except Exception:  # noqa: BLE001
+        logger.exception("connect verify failed for user %s", uid)
+
+    if ok:
+        await message.answer("✅ Твой TickTick подключён. Теперь можно /bind.")
+    else:
+        await message.answer(
+            "⚠️ Сохранил адрес, но проверка не прошла — коннектор недоступен или "
+            "URL неверный. Проверь и пришли /connect ещё раз."
+        )
+
 
 @router.message(Command("app"))
 async def cmd_app(message: Message) -> None:
@@ -350,18 +435,32 @@ def _deploy_prompt(repo_url: str) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     s = get_settings()
-    if await _is_owner(message.from_user.id if message.from_user else None):
+    uid = message.from_user.id if message.from_user else None
+    if await _is_tenant(uid):
+        # A tenant: primary owner, or someone who connected their own Business
+        # account. Both manage only their own chats. Nudge /connect if they
+        # haven't linked their own TickTick yet.
+        has_tt = uid is not None and await get_user_ticktick(str(uid)) is not None
+        tail = (
+            "Через меню ниже можно привязать этот чат к проекту."
+            if has_tt else
+            "Сначала подключи свой TickTick: пришли `/connect <адрес твоего "
+            "ticktick-mcp>`. После этого задачи полетят в ТВОЙ аккаунт, ни в чей "
+            "другой."
+        )
         await message.answer(
             "👁 Большой Брат на связи.\n\n"
             "Я извлекаю задачи и договорённости из переписки — лички и групп — и "
             "завожу их в TickTick. Уведомлений не шлю: задачи просто появляются. "
-            "Я всё вижу.\n\n"
-            "Через меню ниже можно привязать этот чат к проекту.",
+            "Я всё вижу.\n\n" + tail,
             reply_markup=_main_menu(),
+            parse_mode="Markdown",
         )
         return
 
-    # Non-owner: point them at deploying their OWN fully-isolated instance.
+    # Never connected Business: offer to deploy their OWN fully-isolated instance
+    # (alternatively they can add this bot to their Business account, then
+    # /connect their TickTick — but self-hosting keeps their data fully private).
     # The repo is public — no GitHub access, no collaborator invites, no shared
     # infra. Their bot, their MongoDB, their ticktick-mcp, their data.
     lines = [
@@ -413,11 +512,11 @@ async def list_bindings(message: Message) -> None:
 @router.message(F.text == BTN_UNBIND)
 @router.message(Command("unbind"))
 async def unbind(message: Message) -> None:
+    chat_id = _chat_id_for(message)
     if message.chat.type in ("group", "supergroup"):
         actor = message.from_user.id if message.from_user else None
-        if not await _is_owner(actor):
+        if not await _is_chat_owner(actor, chat_id):
             return
-    chat_id = _chat_id_for(message)
     if await repo.delete_project_binding(chat_id):
         await message.answer(f"Привязка для `{chat_id}` снята.")
     else:
@@ -468,11 +567,25 @@ _CS_FIELDS: dict[str, tuple[str, str, str]] = {
 }
 
 
-async def _cs_chats_keyboard() -> InlineKeyboardMarkup:
-    """Top 20 chats sorted by last activity."""
+async def _owner_query(actor_id: int | None) -> dict:
+    """Mongo filter on chat_state restricting to the actor's own chats (tenant
+    isolation). The primary owner also sees legacy/unowned chats so nothing
+    disappears during the multi-tenant transition."""
+    if actor_id is None:
+        return {}
+    primary = await repo.get_bot_state("owner_id")
+    if primary is not None and int(primary) == int(actor_id):
+        return {"$or": [{"ownerId": str(actor_id)}, {"ownerId": {"$in": [None]}},
+                        {"ownerId": {"$exists": False}}]}
+    return {"ownerId": str(actor_id)}
+
+
+async def _cs_chats_keyboard(actor_id: int | None) -> InlineKeyboardMarkup:
+    """Top 20 of the actor's own chats sorted by last activity."""
     from ..db import get_db
     db = get_db()
-    cursor = db.chat_state.find({}, {"chatId": 1, "title": 1}).sort("lastMessageAt", -1).limit(20)
+    q = await _owner_query(actor_id)
+    cursor = db.chat_state.find(q, {"chatId": 1, "title": 1}).sort("lastMessageAt", -1).limit(20)
     chats = [d async for d in cursor]
     rows = [
         [InlineKeyboardButton(
@@ -515,9 +628,10 @@ def _cs_card_keyboard(chat_id: str, settings_doc: dict) -> InlineKeyboardMarkup:
 
 @router.message(F.text == BTN_SETTINGS)
 async def cmd_settings(message: Message) -> None:
-    if not await _is_owner(message.from_user.id if message.from_user else None):
+    actor = message.from_user.id if message.from_user else None
+    if not await _is_tenant(actor):
         return
-    kb = await _cs_chats_keyboard()
+    kb = await _cs_chats_keyboard(actor)
     await message.answer("Выбери чат для настройки:", reply_markup=kb)
 
 
@@ -529,7 +643,7 @@ async def cs_noop(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "cs_back_chats")
 async def cs_back_chats(callback: CallbackQuery) -> None:
     await callback.answer()
-    kb = await _cs_chats_keyboard()
+    kb = await _cs_chats_keyboard(callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         await msg.edit_text("Выбери чат для настройки:", reply_markup=kb)
@@ -639,7 +753,7 @@ async def cs_reset_field(callback: CallbackQuery) -> None:
 
 @router.message(F.text == BTN_GLOBAL)
 async def cmd_global_settings(message: Message) -> None:
-    if not await _is_owner(message.from_user.id if message.from_user else None):
+    if not await _is_tenant(message.from_user.id if message.from_user else None):
         return
     settings_doc = await repo.get_global_settings()
     text = _cs_card_text("__global__", "", settings_doc)
@@ -662,11 +776,14 @@ async def cs_back_global(callback: CallbackQuery) -> None:
 # Bulk Apply
 # ---------------------------------------------------------------------------
 
-async def _bulk_chats_keyboard(source_chat_id: str, selected: list[str]) -> InlineKeyboardMarkup:
-    """Build the bulk-select keyboard with checkboxes."""
+async def _bulk_chats_keyboard(
+    source_chat_id: str, selected: list[str], actor_id: int | None
+) -> InlineKeyboardMarkup:
+    """Build the bulk-select keyboard with checkboxes (actor's own chats only)."""
     from ..db import get_db as _get_db
     db = _get_db()
-    cursor = db.chat_state.find({}, {"chatId": 1, "title": 1}).sort("lastMessageAt", -1).limit(50)
+    q = await _owner_query(actor_id)
+    cursor = db.chat_state.find(q, {"chatId": 1, "title": 1}).sort("lastMessageAt", -1).limit(50)
     chats = [d async for d in cursor]
 
     rows = []
@@ -691,10 +808,11 @@ async def _bulk_chats_keyboard(source_chat_id: str, selected: list[str]) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _all_chat_ids() -> list[str]:
+async def _all_chat_ids(actor_id: int | None) -> list[str]:
     from ..db import get_db as _get_db
     db = _get_db()
-    cursor = db.chat_state.find({}, {"chatId": 1})
+    q = await _owner_query(actor_id)
+    cursor = db.chat_state.find(q, {"chatId": 1})
     return [d["chatId"] async for d in cursor]
 
 
@@ -711,7 +829,7 @@ async def cs_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
         "Глобальные" if source_chat_id == "__global__"
         else await repo.get_chat_title(source_chat_id)
     )
-    kb = await _bulk_chats_keyboard(source_chat_id, [])
+    kb = await _bulk_chats_keyboard(source_chat_id, [], callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         await msg.edit_text(
@@ -733,7 +851,7 @@ async def cs_toggle(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         selected.append(target_chat_id)
     await state.update_data(selected=selected)
-    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected, callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         try:
@@ -748,9 +866,9 @@ async def cs_select_all(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.data:
         return
     source_chat_id = callback.data.split(":", 1)[1]
-    all_ids = await _all_chat_ids()
+    all_ids = await _all_chat_ids(callback.from_user.id)
     await state.update_data(selected=all_ids)
-    kb = await _bulk_chats_keyboard(source_chat_id, all_ids)
+    kb = await _bulk_chats_keyboard(source_chat_id, all_ids, callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         try:
@@ -765,12 +883,12 @@ async def cs_select_dms(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.data:
         return
     source_chat_id = callback.data.split(":", 1)[1]
-    all_ids = await _all_chat_ids()
+    all_ids = await _all_chat_ids(callback.from_user.id)
     dms = [cid for cid in all_ids if cid.startswith("user_")]
     data = await state.get_data()
     selected = list(set(list(data.get("selected", [])) + dms))
     await state.update_data(selected=selected)
-    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected, callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         try:
@@ -785,12 +903,12 @@ async def cs_select_groups(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.data:
         return
     source_chat_id = callback.data.split(":", 1)[1]
-    all_ids = await _all_chat_ids()
+    all_ids = await _all_chat_ids(callback.from_user.id)
     groups = [cid for cid in all_ids if cid.startswith("group_")]
     data = await state.get_data()
     selected = list(set(list(data.get("selected", [])) + groups))
     await state.update_data(selected=selected)
-    kb = await _bulk_chats_keyboard(source_chat_id, selected)
+    kb = await _bulk_chats_keyboard(source_chat_id, selected, callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         try:
@@ -806,7 +924,7 @@ async def cs_clear_sel(callback: CallbackQuery, state: FSMContext) -> None:
         return
     source_chat_id = callback.data.split(":", 1)[1]
     await state.update_data(selected=[])
-    kb = await _bulk_chats_keyboard(source_chat_id, [])
+    kb = await _bulk_chats_keyboard(source_chat_id, [], callback.from_user.id)
     msg = callback.message
     if isinstance(msg, Message):
         try:

@@ -64,12 +64,26 @@ async def touch_chat_state(
     await db.chat_state.update_one({"chatId": chat_id}, update, upsert=True)
 
 
-async def list_known_chats() -> list[dict[str, Any]]:
-    """Every chat the bot has seen, newest activity first — for the Mini App."""
+async def list_known_chats(
+    owner_id: str | None = None, include_unowned: bool = False
+) -> list[dict[str, Any]]:
+    """Every chat the bot has seen, newest activity first — for the Mini App.
+
+    With `owner_id`, restrict to that tenant's chats. `include_unowned` also
+    pulls chats with no ownerId yet (legacy/group chats) — used for the primary
+    owner so nothing disappears during the multi-tenant transition.
+    """
     db = get_db()
-    cursor = db.chat_state.find({}, {"chatId": 1, "title": 1, "lastMessageAt": 1}).sort(
-        "lastMessageAt", -1
-    )
+    query: dict[str, Any] = {}
+    if owner_id is not None:
+        if include_unowned:
+            query = {"$or": [{"ownerId": str(owner_id)}, {"ownerId": {"$in": [None]}},
+                             {"ownerId": {"$exists": False}}]}
+        else:
+            query = {"ownerId": str(owner_id)}
+    cursor = db.chat_state.find(
+        query, {"chatId": 1, "title": 1, "lastMessageAt": 1}
+    ).sort("lastMessageAt", -1)
     return [d async for d in cursor]
 
 
@@ -358,6 +372,12 @@ async def get_connection_owner(connection_id: str | None) -> str | None:
         {"connectionId": connection_id}, {"ownerId": 1}
     )
     return (doc or {}).get("ownerId")
+
+
+async def get_owner_connection_count(owner_id: str) -> int:
+    """How many Business connections a user owns (0 = not a tenant)."""
+    db = get_db()
+    return await db.business_connections.count_documents({"ownerId": str(owner_id)})
 
 
 async def resolve_chat_owner(chat_id: str) -> str | None:
