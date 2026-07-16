@@ -607,6 +607,16 @@ async def cmd_start(
             )
         return
 
+    # Owner or an invited person: land straight on the connector buttons — no
+    # command to type. (Strangers with no access fall through to the tenant /
+    # deploy-your-own messaging below.)
+    if await _has_onboarding_access(uid):
+        await message.answer(
+            "👋 Подключи свои сервисы к своему Claude — просто жми кнопку:",
+            reply_markup=_onboarding_menu(),
+        )
+        return
+
     if await _is_tenant(uid):
         # A tenant: primary owner, or someone who connected their own Business
         # account. Both manage only their own chats. Nudge /connect if they
