@@ -404,11 +404,47 @@ NOTE_TTL_SECONDS = 300  # share links live 5 minutes
 
 
 def _onboarding_menu() -> InlineKeyboardMarkup:
+    """Buttons an invited person sees: connect their own services."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
         ]
+    )
+
+
+def _owner_menu() -> InlineKeyboardMarkup:
+    """Buttons the owner sees: invite people, plus connect their own services."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎟 Пригласить человека", callback_data="onb:invite")],
+            [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
+            [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
+        ]
+    )
+
+
+async def _menu_for(uid: int | None) -> InlineKeyboardMarkup:
+    return _owner_menu() if await _is_owner(uid) else _onboarding_menu()
+
+
+async def _issue_invite_link(bot: Bot) -> str:
+    """Mint an invite and return a self-destruct note link carrying its deep link.
+    Raises RuntimeError if notes aren't configured; propagates create failures."""
+    s = get_settings()
+    if not s.notes_base_url:
+        raise RuntimeError("notes_base_url not set")
+    token = await create_invite()
+    me = await bot.me()
+    deep_link = f"https://t.me/{me.username}?start=inv_{token}"
+    note_text = (
+        "Тебя пригласили подключить свои сервисы (TickTick / Google) к своему "
+        "Claude через бота. Открой ссылку в Telegram и нажми Start:\n\n"
+        f"{deep_link}\n\n"
+        "Дальше бот покажет кнопки — жми и следуй подсказкам."
+    )
+    return await create_note(
+        s.notes_base_url, note_text, ttl_seconds=NOTE_TTL_SECONDS, one_view=True
     )
 
 
@@ -454,23 +490,11 @@ async def cmd_invite(message: Message, bot: Bot) -> None:
     uid = message.from_user.id if message.from_user else None
     if not await _is_owner(uid):
         return  # silent for non-owners
-    s = get_settings()
-    if not s.notes_base_url:
+    if not get_settings().notes_base_url:
         await message.answer("Не задан NOTES_BASE_URL — приглашения недоступны.")
         return
-    token = await create_invite()
-    me = await bot.me()
-    deep_link = f"https://t.me/{me.username}?start=inv_{token}"
-    note_text = (
-        "Тебя пригласили подключить свои сервисы (TickTick / Google) к своему "
-        "Claude через бота. Открой ссылку в Telegram и нажми Start:\n\n"
-        f"{deep_link}\n\n"
-        "Дальше бот покажет кнопки — жми и следуй подсказкам."
-    )
     try:
-        link = await create_note(
-            s.notes_base_url, note_text, ttl_seconds=NOTE_TTL_SECONDS, one_view=True
-        )
+        link = await _issue_invite_link(bot)
     except Exception:  # noqa: BLE001
         logger.exception("invite note failed")
         await message.answer("⚠️ Не смог создать приглашение. Попробуй ещё раз.")
@@ -493,7 +517,32 @@ async def cmd_setup(message: Message) -> None:
         )
         return
     await message.answer(
-        "Выбери, что подключить к своему Claude:", reply_markup=_onboarding_menu()
+        "Выбери действие:", reply_markup=await _menu_for(uid)
+    )
+
+
+@router.callback_query(F.data == "onb:invite")
+async def on_onboarding_invite(cb: CallbackQuery) -> None:
+    """Owner button: mint a one-time invite and return its self-destruct link."""
+    uid = cb.from_user.id if cb.from_user else None
+    if not await _is_owner(uid):
+        await cb.answer("Только владелец может приглашать.", show_alert=True)
+        return
+    if not get_settings().notes_base_url:
+        await cb.answer("Онбординг не настроен (нет NOTES_BASE_URL).", show_alert=True)
+        return
+    try:
+        link = await _issue_invite_link(cb.bot)
+    except Exception:  # noqa: BLE001
+        logger.exception("invite note failed (button)")
+        await cb.answer("Не смог создать приглашение, попробуй ещё раз.", show_alert=True)
+        return
+    await cb.answer()
+    await cb.message.answer(
+        "🎟 Одноразовое приглашение готово. Перешли ЭТУ ссылку человеку — она "
+        "живёт 5 минут и откроется один раз:\n\n"
+        f"{link}",
+        disable_web_page_preview=True,
     )
 
 
@@ -607,10 +656,17 @@ async def cmd_start(
             )
         return
 
-    # Owner or an invited person: land straight on the connector buttons — no
-    # command to type. (Strangers with no access fall through to the tenant /
-    # deploy-your-own messaging below.)
-    if await _has_onboarding_access(uid):
+    # Land straight on buttons — no command to type. The owner gets the admin
+    # menu (invite + connect own services); an invited person gets the connector
+    # buttons. Strangers with no access fall through to the messaging below.
+    if await _is_owner(uid):
+        await message.answer(
+            "👋 Панель Большого Брата.\n\nПригласи человека или подключи свои "
+            "сервисы к своему Claude:",
+            reply_markup=_owner_menu(),
+        )
+        return
+    if uid is not None and await has_access(str(uid)):
         await message.answer(
             "👋 Подключи свои сервисы к своему Claude — просто жми кнопку:",
             reply_markup=_onboarding_menu(),
