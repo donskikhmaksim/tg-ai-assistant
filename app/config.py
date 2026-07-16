@@ -79,6 +79,22 @@ class Settings(BaseSettings):
     onboarding_repo_url: str = ""          # e.g. https://github.com/<owner>/tg-ai-assistant
     onboarding_railway_template_url: str = ""  # optional "Deploy on Railway" one-click URL
 
+    # Connector onboarding (/setup): hand a person a ONE-command install for their
+    # OWN TickTick + Google MCP servers, connected to THEIR Claude. The bot fills
+    # the owner's SHARED secrets into that command (shared Google OAuth client +
+    # relay — see the Google MCP hub) and delivers it via a self-destruct note so
+    # the secrets never sit in Telegram history. Empty secrets → /setup is off.
+    # NOTE: these are the OWNER's secrets; anyone who can run /setup receives them.
+    notes_base_url: str = ""  # Self-Destroyed-Notes origin, e.g. https://self-destroyed-notes-production.up.railway.app
+    onboarding_google_setup_url: str = "https://github.com/donskikhmaksim/sheets-mcp/raw/main/scripts/setup.sh"
+    onboarding_google_client_id: str = ""
+    onboarding_google_client_secret: str = ""
+    onboarding_relay_url: str = "https://maksims-mac-mini.taild91c23.ts.net"
+    onboarding_relay_secret: str = ""
+    onboarding_ticktick_setup_url: str = "https://github.com/donskikhmaksim/ticktick-mcp/raw/main/scripts/setup.sh"
+    onboarding_ticktick_client_id: str = ""
+    onboarding_ticktick_client_secret: str = ""
+
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
     # Railway injects PORT; the aiohttp server binds it. WEBAPP_URL drives the

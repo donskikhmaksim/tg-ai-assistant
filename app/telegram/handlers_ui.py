@@ -21,7 +21,13 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.filters import ChatMemberUpdatedFilter, Command, CommandStart, JOIN_TRANSITION
+from aiogram.filters import (
+    ChatMemberUpdatedFilter,
+    Command,
+    CommandObject,
+    CommandStart,
+    JOIN_TRANSITION,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -37,6 +43,8 @@ from aiogram.types import (
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..onboarding.invites import create_invite, has_access, redeem_invite
+from ..onboarding.notes import create_note
 from ..onboarding.ticktick_resolve import get_user_ticktick, set_user_mcp_url
 from .notify import group_watch_announcement
 
@@ -387,6 +395,150 @@ async def cmd_connect(message: Message) -> None:
         )
 
 
+# Connector onboarding. Invite-gated: the owner mints a one-time invite
+# (/invite), which arrives as a self-destruct note holding a `?start=inv_<token>`
+# deep link. Opening it grants onboarding access; only then do the per-service
+# buttons hand out the install command (each in its own 5-minute self-destruct
+# note, so the owner's shared secrets never sit in Telegram history).
+NOTE_TTL_SECONDS = 300  # share links live 5 minutes
+
+
+def _onboarding_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
+            [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
+        ]
+    )
+
+
+def _service_command(service: str, s) -> tuple[str, str] | None:
+    """(human title, paste-ready install command) for one service, or None when
+    the owner has not configured that service's shared secrets."""
+    if service == "ticktick":
+        if not (s.onboarding_ticktick_client_id and s.onboarding_ticktick_client_secret):
+            return None
+        cmd = (
+            f"bash <(curl -fsSL {s.onboarding_ticktick_setup_url}) "
+            f"--client-id {s.onboarding_ticktick_client_id} "
+            f"--client-secret {s.onboarding_ticktick_client_secret}"
+        )
+        return ("TickTick", cmd)
+    if service == "google":
+        if not (
+            s.onboarding_google_client_id
+            and s.onboarding_google_client_secret
+            and s.onboarding_relay_secret
+        ):
+            return None
+        cmd = (
+            f"bash <(curl -fsSL {s.onboarding_google_setup_url}) "
+            f"--client-id {s.onboarding_google_client_id} "
+            f"--client-secret {s.onboarding_google_client_secret} "
+            f"--relay-secret {s.onboarding_relay_secret}"
+        )
+        return ("Google (Gmail / Drive / Docs / Sheets / Calendar)", cmd)
+    return None
+
+
+async def _has_onboarding_access(uid: int | None) -> bool:
+    if uid is None:
+        return False
+    return await _is_owner(uid) or await has_access(str(uid))
+
+
+@router.message(Command("invite"))
+async def cmd_invite(message: Message, bot: Bot) -> None:
+    """Owner-only: mint a one-time invite delivered as a self-destruct note that
+    carries a deep link into this bot."""
+    uid = message.from_user.id if message.from_user else None
+    if not await _is_owner(uid):
+        return  # silent for non-owners
+    s = get_settings()
+    if not s.notes_base_url:
+        await message.answer("Не задан NOTES_BASE_URL — приглашения недоступны.")
+        return
+    token = await create_invite()
+    me = await bot.me()
+    deep_link = f"https://t.me/{me.username}?start=inv_{token}"
+    note_text = (
+        "Тебя пригласили подключить свои сервисы (TickTick / Google) к своему "
+        "Claude через бота. Открой ссылку в Telegram и нажми Start:\n\n"
+        f"{deep_link}\n\n"
+        "Дальше бот покажет кнопки — жми и следуй подсказкам."
+    )
+    try:
+        link = await create_note(
+            s.notes_base_url, note_text, ttl_seconds=NOTE_TTL_SECONDS, one_view=True
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("invite note failed")
+        await message.answer("⚠️ Не смог создать приглашение. Попробуй ещё раз.")
+        return
+    await message.answer(
+        "🎟 Одноразовое приглашение готово. Перешли ЭТУ ссылку человеку — она "
+        "живёт 5 минут и откроется один раз:\n\n"
+        f"{link}",
+        disable_web_page_preview=True,
+    )
+
+
+@router.message(Command("setup"))
+async def cmd_setup(message: Message) -> None:
+    """Show the connector-onboarding buttons — only to invited users / the owner."""
+    uid = message.from_user.id if message.from_user else None
+    if not await _has_onboarding_access(uid):
+        await message.answer(
+            "Чтобы подключать сервисы, нужно приглашение от владельца бота."
+        )
+        return
+    await message.answer(
+        "Выбери, что подключить к своему Claude:", reply_markup=_onboarding_menu()
+    )
+
+
+@router.callback_query(F.data.in_({"onb:google", "onb:ticktick"}))
+async def on_onboarding_pick(cb: CallbackQuery) -> None:
+    """Hand out one service's install command as a fresh 5-minute self-destruct note."""
+    uid = cb.from_user.id if cb.from_user else None
+    if not await _has_onboarding_access(uid):
+        await cb.answer("Нужно приглашение от владельца.", show_alert=True)
+        return
+    s = get_settings()
+    if not s.notes_base_url:
+        await cb.answer("Онбординг не настроен владельцем.", show_alert=True)
+        return
+    service = "google" if cb.data == "onb:google" else "ticktick"
+    built = _service_command(service, s)
+    if built is None:
+        await cb.answer("Этот коннектор не настроен владельцем.", show_alert=True)
+        return
+    title, cmd = built
+    note_text = (
+        f"Команда установки — {title}. Открой Терминал (Mac: Cmd+Space → Terminal; "
+        "Windows: WSL или Git Bash) и вставь — она развернёт твой личный сервер на "
+        "ТВОЁМ Railway и подключит к ТВОЕМУ Claude:\n\n"
+        f"{cmd}\n\n"
+        "Скрипт сам поставит Railway CLI, залогинит и всё развернёт — дальше следуй "
+        "подсказкам в терминале."
+    )
+    try:
+        link = await create_note(
+            s.notes_base_url, note_text, ttl_seconds=NOTE_TTL_SECONDS, one_view=True
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("create_note failed for onboarding pick %s", service)
+        await cb.answer("Не смог создать ссылку, попробуй ещё раз.", show_alert=True)
+        return
+    await cb.answer()
+    await cb.message.answer(
+        f"🔐 {title} — ссылка на команду (живёт 5 минут, откроется один раз):\n\n"
+        f"{link}\n\n"
+        "Открой её на компьютере, где будешь ставить, и скопируй команду.",
+        disable_web_page_preview=True,
+    )
+
+
 @router.message(Command("app"))
 async def cmd_app(message: Message) -> None:
     url = get_settings().webapp_url
@@ -433,9 +585,28 @@ def _deploy_prompt(repo_url: str) -> str:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(
+    message: Message, state: FSMContext, command: CommandObject
+) -> None:
     s = get_settings()
     uid = message.from_user.id if message.from_user else None
+
+    # Invite deep link: `?start=inv_<token>`. Redeeming grants onboarding access
+    # and drops the person straight onto the connector buttons.
+    payload = (command.args or "").strip()
+    if payload.startswith("inv_"):
+        if uid is not None and await redeem_invite(payload[4:], str(uid)):
+            await message.answer(
+                "✅ Приглашение принято! Выбери, что подключить к своему Claude:",
+                reply_markup=_onboarding_menu(),
+            )
+        else:
+            await message.answer(
+                "Это приглашение недействительно или уже использовано. "
+                "Попроси у владельца новое."
+            )
+        return
+
     if await _is_tenant(uid):
         # A tenant: primary owner, or someone who connected their own Business
         # account. Both manage only their own chats. Nudge /connect if they
