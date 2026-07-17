@@ -418,6 +418,7 @@ def _owner_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎟 Пригласить человека", callback_data="onb:invite")],
+            [InlineKeyboardButton(text="➕ Добавить Google-аккаунт", callback_data="onb:add_google")],
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
         ]
@@ -542,6 +543,52 @@ async def on_onboarding_invite(cb: CallbackQuery) -> None:
         "🎟 Одноразовое приглашение готово. Перешли ЭТУ ссылку человеку — она "
         "живёт 5 минут и откроется один раз:\n\n"
         f"{link}",
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data == "onb:add_google")
+async def on_add_google(cb: CallbackQuery) -> None:
+    """Owner button: start the Google MCP 'add account' flow and hand back the
+    Google consent URL via a self-destruct note (dashboard secret never shown)."""
+    uid = cb.from_user.id if cb.from_user else None
+    if not await _is_owner(uid):
+        await cb.answer("Только владелец.", show_alert=True)
+        return
+    s = get_settings()
+    if not s.google_dashboard_add_url or not s.notes_base_url:
+        await cb.answer(
+            "Не настроено (нет GOOGLE_DASHBOARD_ADD_URL или NOTES_BASE_URL).",
+            show_alert=True,
+        )
+        return
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(follow_redirects=False, timeout=20) as client:
+            resp = await client.get(s.google_dashboard_add_url)
+        consent_url = resp.headers.get("location")
+        if not consent_url:
+            raise RuntimeError(f"no redirect from dashboard (status {resp.status_code})")
+        link = await create_note(
+            s.notes_base_url,
+            "Добавление Google-аккаунта. Открой ссылку, выбери нужный аккаунт и "
+            "подтверди доступ. На экране «Google hasn't verified this app» жми "
+            "Advanced → Go to (unsafe). Аккаунт появится во всех твоих Google-"
+            "сервисах сразу:\n\n" + consent_url,
+            ttl_seconds=NOTE_TTL_SECONDS,
+            one_view=True,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("add_google failed")
+        await cb.answer(
+            "Не смог получить ссылку на добавление, попробуй ещё раз.", show_alert=True
+        )
+        return
+    await cb.answer()
+    await cb.message.answer(
+        "🔐 Ссылка для добавления Google-аккаунта (живёт 5 минут, откроется один раз):"
+        f"\n\n{link}",
         disable_web_page_preview=True,
     )
 

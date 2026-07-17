@@ -94,6 +94,13 @@ class Settings(BaseSettings):
     onboarding_ticktick_setup_url: str = "https://github.com/donskikhmaksim/ticktick-mcp/raw/main/scripts/setup.sh"
     onboarding_ticktick_client_id: str = ""
     onboarding_ticktick_client_secret: str = ""
+    # Owner-only "add my own Google account" button. Full add-account URL on the
+    # Google MCP dashboard, e.g.
+    # https://<google-mcp>.up.railway.app/dashboard/<DASHBOARD_SECRET>/add
+    # The bot GETs it, captures the Google consent URL from the redirect, and
+    # delivers it as a self-destruct note (so the dashboard secret never appears
+    # in Telegram). Empty → the button says it's not configured.
+    google_dashboard_add_url: str = ""
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
