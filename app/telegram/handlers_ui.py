@@ -441,7 +441,7 @@ async def _issue_invite_link(bot: Bot) -> str:
     note_text = (
         "Тебя пригласили подключить свои сервисы (TickTick / Google) к своему "
         "Claude через бота. Открой ссылку в Telegram и нажми Start:\n\n"
-        f"{deep_link}\n\n"
+        f"[🔗 Открыть бота в Telegram]({deep_link})\n\n"
         "Дальше бот покажет кнопки — жми и следуй подсказкам."
     )
     return await create_note(
@@ -572,10 +572,11 @@ async def on_add_google(cb: CallbackQuery) -> None:
             raise RuntimeError(f"no redirect from dashboard (status {resp.status_code})")
         link = await create_note(
             s.notes_base_url,
-            "Добавление Google-аккаунта. Открой ссылку, выбери нужный аккаунт и "
-            "подтверди доступ. На экране «Google hasn't verified this app» жми "
-            "Advanced → Go to (unsafe). Аккаунт появится во всех твоих Google-"
-            "сервисах сразу:\n\n" + consent_url,
+            "Добавление Google-аккаунта. Открой ссылку ниже, выбери нужный "
+            "аккаунт и подтверди доступ. На экране «Google hasn't verified this "
+            "app» жми Advanced → Go to (unsafe). Аккаунт появится во всех твоих "
+            "Google-сервисах сразу:\n\n"
+            f"[🔗 Открыть добавление аккаунта]({consent_url})",
             ttl_seconds=NOTE_TTL_SECONDS,
             one_view=True,
         )
