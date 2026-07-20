@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     claude_cli_model: str = "opus"  # Claude Code model alias (opus | sonnet | full id)
     claude_cli_timeout: int = 300
 
+    # Daily extraction watchdog. Once a day the bot probes the extraction chain
+    # (tier-1 Qwen, then tier-2 Claude shim/API — SAME order as the pipeline,
+    # without touching it) and, if anything is down, DMs the primary owner so a
+    # dead shim (e.g. `claude` logged out → 500) can't silently stall tasks for
+    # days. Nags once per run (i.e. daily) while broken. Hour/minute are in
+    # default_timezone. Set enabled=False to mute.
+    healthcheck_enabled: bool = True
+    healthcheck_hour: int = 9
+    healthcheck_minute: int = 0
+
     # Pipeline tuning
     batch_interval_min: int = 2  # scheduler tick; debounce (quiet_minutes) gates real work
     # Debounce: process a dirty chat only once it's been quiet for quiet_minutes

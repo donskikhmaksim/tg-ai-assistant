@@ -81,3 +81,24 @@ async def has_task(
     except Exception:  # noqa: BLE001 — fail open, let Claude decide
         logger.warning("Qwen triage failed; failing open (has_task=True)", exc_info=True)
         return True
+
+
+async def healthcheck() -> tuple[bool, str]:
+    """Honest tier-1 probe for the daily watchdog — does NOT fail open like
+    has_task(). A minimal round-trip to the Qwen endpoint; returns (ok, detail).
+    """
+    s = get_settings()
+    try:
+        resp = await _get_client().chat.completions.create(
+            model=s.qwen_model,
+            messages=[
+                {"role": "system", "content": 'Respond with strict JSON only: {"has_task": false}.'},
+                {"role": "user", "content": "ping"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        json.loads(resp.choices[0].message.content or "")  # must be parseable JSON
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"[:300]

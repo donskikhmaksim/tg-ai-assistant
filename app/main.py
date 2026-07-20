@@ -11,6 +11,7 @@ from aiogram.types import MenuButtonWebApp, WebAppInfo
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
+from .pipeline.watchdog import run_watchdog
 from .repositories import init_global_defaults
 from .telegram.bot import build_bot, build_dispatcher
 from .web.server import start_web
@@ -49,6 +50,25 @@ async def main() -> None:
 
     bot = build_bot()
     dp = build_dispatcher()
+
+    # Daily watchdog: nag the owner if the extraction chain is down. Added after
+    # the bot exists (it needs it to DM); APScheduler accepts jobs post-start().
+    if settings.healthcheck_enabled:
+        scheduler.add_job(
+            run_watchdog,
+            "cron",
+            hour=settings.healthcheck_hour,
+            minute=settings.healthcheck_minute,
+            timezone=settings.default_timezone,
+            id="watchdog",
+            max_instances=1,
+            coalesce=True,
+            kwargs={"bot": bot},
+        )
+        logger.info(
+            "Extraction watchdog scheduled: daily at %02d:%02d %s",
+            settings.healthcheck_hour, settings.healthcheck_minute, settings.default_timezone,
+        )
 
     # Phase-2 Mini App: HTTP server alongside polling (binds Railway's $PORT).
     web_runner = await start_web(bot)

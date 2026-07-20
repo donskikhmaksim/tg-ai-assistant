@@ -294,3 +294,34 @@ async def _extract_via_cli(s: Any, system: str, user: str) -> dict[str, Any]:
     if not data.get("ok"):
         raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
     return _parse_json_loose(data.get("result") or "")
+
+
+async def healthcheck() -> tuple[bool, str]:
+    """Canary for the daily watchdog that exercises the SAME tier-2 path as
+    extract(): the CLI shim when claude_cli_url is set (catches a dead shim, e.g.
+    `claude` logged out -> 500), otherwise the Anthropic API. Returns (ok, detail);
+    never raises, never falls back to the other path."""
+    s = get_settings()
+    if s.claude_cli_url:
+        try:
+            payload = {"prompt": "Reply with the single word: ok", "system": "",
+                       "model": s.claude_cli_model}
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=min(s.claude_cli_timeout, 60)) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                return False, f"shim error: {str(data.get('error'))[:200]}"
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            return False, f"{type(e).__name__}: {str(e)[:200]}"
+    try:
+        await _get_client().messages.create(
+            model=s.anthropic_model,
+            max_tokens=8,
+            messages=[{"role": "user", "content": "Reply with: ok"}],
+        )
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
