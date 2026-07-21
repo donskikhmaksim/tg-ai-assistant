@@ -30,3 +30,36 @@ def test_created_id_absent_returns_none():
     # Older server build without the id trailer → parse yields None (client then
     # falls back to the title search).
     assert _id("Создано 1:\n✓ «Позвонить маме»") is None
+
+
+# ── find_task_id title extraction vs search_tasks meta block ──────────────
+from app.ticktick.mcp_client import _SEARCH_TITLE_RE
+
+
+def _title(line: str) -> str | None:
+    m = _SEARCH_TITLE_RE.match(line.strip())
+    return m.group(1).strip() if m else None
+
+
+def test_search_title_plain():
+    assert _title("- [Inbox] Составить ТЗ  (id:abc proj:p1)") == "Составить ТЗ"
+
+
+def test_search_title_strips_meta_block():
+    # format_task_line appends " · due <d>, P-High #tag" BEFORE the id — the
+    # exact-title match must not swallow it (else any task with a due/priority
+    # never matches its own title).
+    line = "- [Inbox] Оплатить аренду · due 2026-07-25, P-High #дом  (id:abc proj:p1)"
+    assert _title(line) == "Оплатить аренду"
+
+
+def test_search_title_subtask_marker():
+    # format_task_tree prefixes subtask lines with "↳ " BEFORE the bullet.
+    assert _title("  ↳ - Купить молоко · due 2026-07-22  (id:xyz proj:p1)") == "Купить молоко"
+
+
+def test_search_title_keeps_inner_middle_dot():
+    # A "·" INSIDE the title must survive — only the trailing " · due/P-/#"
+    # metadata block is stripped (it always starts with a known keyword).
+    line = "- Проект А · фаза 2 · due 2026-08-01  (id:q proj:p)"
+    assert _title(line) == "Проект А · фаза 2"

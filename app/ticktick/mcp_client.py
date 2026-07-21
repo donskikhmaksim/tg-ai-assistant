@@ -77,10 +77,16 @@ _BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
 # search_tasks format: "- [Project] <title>  (id:<id> proj:<pid>)" (no space
 # after id:, and "proj:" right after) — used to recover a freshly-created id.
 _SEARCH_ID_RE = re.compile(r"\(id:\s*(\S+?)\s+proj:", re.I)
-# search_tasks line: "- [Project] <title>  (id:<id> proj:<pid>)". Capture the
-# title so we can match it EXACTLY (a substring match would link a task to a
-# longer near-duplicate's id, e.g. "Составить ТЗ" → "Составить ТЗ, дедлайн пт").
-_SEARCH_TITLE_RE = re.compile(r"^[-*]\s*(?:\[[^\]]*\]\s*)?(.+?)\s*\(id:", re.I)
+# search_tasks line: "- [Project] <title> · due <d>, P-High #tag  (id:<id> proj:<pid>)".
+# Capture the title so we can match it EXACTLY (a substring match would link a
+# task to a longer near-duplicate's id). The optional " · <meta>" block between
+# title and "(id:" (due/priority/tags) and the "↳ " subtask marker must be
+# stripped, else any task WITH metadata never exact-matches its own title.
+_SEARCH_TITLE_RE = re.compile(
+    r"^(?:↳\s*)?[-*]\s*(?:↳\s*)?(?:\[[^\]]*\]\s*)?(.+?)"
+    r"(?:\s+·\s+(?:due |P-|#)[^()]*)?\s*\(id:",
+    re.I,
+)
 # get_project_tasks / search_tasks task lines: "- [Project] <title>  (id:<id> ...)"
 # The optional "[...]" label and trailing "proj:<pid>" are tolerated.
 _TASK_LINE_RE = re.compile(
@@ -359,14 +365,24 @@ class TickTickMCP:
         return _parse_project_cards(raw)[:limit]
 
     async def add_task_comment(
-        self, project_id: str, task_id: str, content: str
+        self, project_id: str, task_id: str, content: str, task_title: str = ""
     ) -> str:
         """Append a comment to an existing task (enrich, append-only — no
         overwrite risk). Used when a new task is a semantic duplicate of one
-        already in TickTick."""
+        already in TickTick.
+
+        The server tool signature is (task_title, text, project_id, task_id) —
+        `task_title` is display-only (confirmation dialog) but REQUIRED, and the
+        body param is `text`, not `content`. We used to send {content,…} and
+        every call failed schema validation silently."""
         return await self.call(
             "add_task_comment",
-            {"task_id": task_id, "project_id": project_id, "content": content},
+            {
+                "task_title": task_title or "(задача)",
+                "text": content,
+                "project_id": project_id,
+                "task_id": task_id,
+            },
         )
 
     async def create_tasks(self, tasks: list[dict[str, Any]], summary: str) -> str:

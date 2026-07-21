@@ -442,7 +442,9 @@ async def _enrich_duplicate(
     project_id = match.get("projectId")
     if tt is not None and tt_id and project_id:
         try:
-            await tt.add_task_comment(project_id, tt_id, extra)
+            await tt.add_task_comment(
+                project_id, tt_id, extra, task_title=match.get("title") or ""
+            )
         except Exception:  # noqa: BLE001 — enrich comment is best-effort
             logger.debug(
                 "Chat %s: TickTick enrich comment failed (best-effort)",
