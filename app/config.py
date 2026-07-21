@@ -47,14 +47,29 @@ class Settings(BaseSettings):
     # Semantic near-duplicate detection (before creating a task). When "on" AND
     # embeddings are available (embed_model set + reachable), a new task is
     # compared by cosine similarity against existing OPEN tasks — the chat's own
-    # (Mongo) and the tasks already in the bound TickTick project — and, at or
-    # above `dedup_similarity`, treated as a DUPLICATE: the existing task is
-    # enriched (genuinely-new detail appended) instead of creating a second one.
-    # Falls back to the exact-title hash dedup when off or embeddings are down, so
-    # it never crashes a self-host without a local model. Both knobs are
-    # overridable globally and per-chat (like control_mode).
+    # (Mongo) and the tasks already in the bound TickTick project. A single cosine
+    # threshold isn't safe (real dups sit ~0.86 while distinct-but-related tasks
+    # reach ~0.83), and a FALSE merge is worse than a missed dup — it SKIPS
+    # creating the task, dropping a real one. So we use THREE bands against the
+    # single best-matching existing task:
+    #   cosine ≥ dedup_high            → duplicate (auto; enrich + skip, no LLM)
+    #   cosine ≤ dedup_low             → distinct  (create)
+    #   dedup_low < cosine < dedup_high → gray zone → a cheap LLM judge decides
+    # On ANY uncertainty (judge errors/times out, embeddings or LLM unavailable)
+    # we CREATE — never drop a real task on doubt; only the ≥high band auto-merges
+    # without the judge. Falls back to the exact-title hash dedup when off or
+    # embeddings are down. All knobs are global + per-chat overridable (string-
+    # parsed, like control_mode).
     dedup_semantic: str = "on"          # on | off
-    dedup_similarity: float = 0.86      # cosine threshold for "same task"
+    dedup_low: float = 0.83             # ≤ this cosine → definitely distinct
+    dedup_high: float = 0.93            # ≥ this cosine → definitely duplicate
+    # Model for the gray-zone yes/no judge (a single tiny call). CLI-shim alias
+    # (sonnet | haiku | opus) or a full API model id; on the API path the aliases
+    # map to claude-sonnet-5 / claude-haiku-4-5 / the configured extraction model.
+    dedup_judge_model: str = "sonnet"
+    # Deprecated: superseded by the dedup_low/dedup_high bands. Kept so an existing
+    # DEDUP_SIMILARITY in a .env doesn't error; no longer used in the decision.
+    dedup_similarity: float = 0.86
     # Cap on how many of the bound project's tasks are embedded/compared per run,
     # so a huge project can't blow up latency. Stored embeddings are reused across
     # runs; only new/changed task titles are re-embedded.

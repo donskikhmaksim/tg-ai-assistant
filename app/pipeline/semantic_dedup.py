@@ -8,8 +8,11 @@ creating a second one.
 """
 from __future__ import annotations
 
+import logging
 import math
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -44,6 +47,43 @@ def best_match(
     if best is None:
         return None
     return {**best, "score": best_score}
+
+
+def band(score: float, low: float, high: float) -> str:
+    """Classify a best-match cosine into one of three bands:
+    "duplicate" (≥ high), "distinct" (≤ low), or "gray" (in between)."""
+    if score >= high:
+        return "duplicate"
+    if score <= low:
+        return "distinct"
+    return "gray"
+
+
+async def decide_duplicate(
+    score: float,
+    low: float,
+    high: float,
+    judge: Callable[[], Awaitable[bool | None]],
+) -> bool:
+    """Whether a new task should be treated as a duplicate of its best match.
+
+    Three bands (see config): ≥ high → duplicate automatically (no judge call);
+    ≤ low → distinct; in between → the gray zone, where `judge()` (a cheap LLM
+    yes/no) breaks the tie. BIAS TO SAFE: a false merge SKIPS creating the task,
+    i.e. drops a real one, so any uncertainty resolves to distinct — the judge is
+    only consulted in the gray band, and a judge that returns None or raises means
+    CREATE. Only the ≥ high band auto-merges without the judge."""
+    b = band(score, low, high)
+    if b == "duplicate":
+        return True
+    if b == "distinct":
+        return False
+    try:
+        verdict = await judge()
+    except Exception:  # noqa: BLE001 — never drop a task because the judge failed
+        logger.warning("Dedup judge failed; treating as distinct (create)", exc_info=True)
+        return False
+    return verdict is True
 
 
 def merge_details(existing: str | None, new: str | None) -> str | None:

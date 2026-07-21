@@ -104,7 +104,8 @@ async def process_chat(chat_id: str) -> None:
     control_tag = settings_doc.get("control_tag") or s.control_tag
     # Semantic near-duplicate dedup: per-chat override, else global, else env.
     dedup_semantic = settings_doc.get("dedup_semantic") or s.dedup_semantic
-    dedup_similarity = _as_float(settings_doc.get("dedup_similarity"), s.dedup_similarity)
+    dedup_low = _as_float(settings_doc.get("dedup_low"), s.dedup_low)
+    dedup_high = _as_float(settings_doc.get("dedup_high"), s.dedup_high)
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -153,7 +154,8 @@ async def process_chat(chat_id: str) -> None:
         control_mode, control_marker, control_tag,
         open_tasks=open_tasks,
         sem_mode=dedup_semantic,
-        sem_threshold=dedup_similarity,
+        sem_low=dedup_low,
+        sem_high=dedup_high,
         sem_cap=s.dedup_project_task_cap,
     )
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
@@ -439,7 +441,8 @@ async def _create_new_tasks(
     control_tag: str = "контроль",
     open_tasks: list[dict[str, Any]] | None = None,
     sem_mode: str = "on",
-    sem_threshold: float = 0.86,
+    sem_low: float = 0.83,
+    sem_high: float = 0.93,
     sem_cap: int = 200,
 ) -> None:
     if not new_tasks:
@@ -477,19 +480,24 @@ async def _create_new_tasks(
             continue
         is_control = decision == "control"
 
-        # Semantic dedup: is this task the same as one that already exists (this
-        # chat's open tasks or the bound project)? If so, enrich it and skip
-        # creating a second one. Below threshold → fall through and create.
+        # Semantic dedup: compare against the single best-matching existing task
+        # (this chat's open tasks or the bound project) and decide by band —
+        # ≥high auto-duplicate, ≤low distinct, gray zone asks the LLM judge.
+        # Bias to safe: any uncertainty → create (never drop a real task).
         qvec = title_vecs.get(title) if matcher is not None else None
         if matcher is not None and qvec is not None:
-            match = sd.best_match(qvec, matcher, sem_threshold)
+            match = sd.best_match(qvec, matcher, sem_low)
             if match is not None:
-                await _enrich_duplicate(chat_id, match, t, tt)
-                logger.info(
-                    "Chat %s: semantic duplicate (%.3f) of %r — enriched, not creating: %s",
-                    chat_id, match["score"], match.get("title"), title,
-                )
-                continue
+                async def _judge(_title=title, _match_title=match.get("title")):
+                    return await claude.judge_same_task(_title, _match_title)
+
+                if await sd.decide_duplicate(match["score"], sem_low, sem_high, _judge):
+                    await _enrich_duplicate(chat_id, match, t, tt)
+                    logger.info(
+                        "Chat %s: semantic duplicate (%.3f) of %r — enriched, not creating: %s",
+                        chat_id, match["score"], match.get("title"), title,
+                    )
+                    continue
 
         dedup = repo.dedup_hash(chat_id, title)
         task_doc = {

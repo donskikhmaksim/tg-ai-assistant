@@ -1,4 +1,12 @@
-from app.pipeline.semantic_dedup import best_match, cosine, merge_details
+import asyncio
+
+from app.pipeline.semantic_dedup import (
+    band,
+    best_match,
+    cosine,
+    decide_duplicate,
+    merge_details,
+)
 from app.ticktick.mcp_client import _parse_task_lines
 
 
@@ -101,6 +109,80 @@ def test_merge_details_case_insensitive_substring():
 def test_merge_details_no_existing_returns_new():
     assert merge_details(None, "first detail") == "first detail"
     assert merge_details("", "first detail") == "first detail"
+
+
+# ── band classification ──────────────────────────────────────────────────
+LOW, HIGH = 0.83, 0.93
+
+
+def test_band_duplicate_at_and_above_high():
+    assert band(0.93, LOW, HIGH) == "duplicate"
+    assert band(0.987, LOW, HIGH) == "duplicate"  # "tap-to-pay" vs "tap to pay"
+
+
+def test_band_distinct_at_and_below_low():
+    assert band(0.83, LOW, HIGH) == "distinct"
+    assert band(0.488, LOW, HIGH) == "distinct"  # genuinely distinct
+
+
+def test_band_gray_in_between():
+    assert band(0.857, LOW, HIGH) == "gray"  # real dup that a single 0.86 misses
+    assert band(0.879, LOW, HIGH) == "gray"
+    assert band(0.832, LOW, HIGH) == "gray"  # the observed false positive
+
+
+# ── decide_duplicate (band + gray-zone judge) ────────────────────────────
+def _run(coro):
+    return asyncio.run(coro)
+
+
+async def _judge_yes():
+    return True
+
+
+async def _judge_no():
+    return False
+
+
+async def _judge_none():
+    return None
+
+
+async def _judge_boom():
+    raise RuntimeError("judge unavailable")
+
+
+def test_decide_high_band_is_duplicate_without_judge():
+    # ≥ high → duplicate; the judge must NOT be consulted (would raise if it were).
+    assert _run(decide_duplicate(0.95, LOW, HIGH, _judge_boom)) is True
+
+
+def test_decide_low_band_is_distinct_without_judge():
+    # ≤ low → distinct; judge not consulted.
+    assert _run(decide_duplicate(0.80, LOW, HIGH, _judge_boom)) is False
+
+
+def test_decide_gray_calls_judge_yes():
+    assert _run(decide_duplicate(0.857, LOW, HIGH, _judge_yes)) is True
+
+
+def test_decide_gray_calls_judge_no():
+    assert _run(decide_duplicate(0.832, LOW, HIGH, _judge_no)) is False
+
+
+def test_decide_gray_judge_none_is_distinct():
+    # Judge unavailable → SAFE default: create (distinct), never drop a task.
+    assert _run(decide_duplicate(0.87, LOW, HIGH, _judge_none)) is False
+
+
+def test_decide_gray_judge_error_is_distinct():
+    assert _run(decide_duplicate(0.87, LOW, HIGH, _judge_boom)) is False
+
+
+def test_decide_boundary_high_inclusive_low_inclusive():
+    # Exactly at high → duplicate (no judge); exactly at low → distinct (no judge).
+    assert _run(decide_duplicate(0.93, LOW, HIGH, _judge_boom)) is True
+    assert _run(decide_duplicate(0.83, LOW, HIGH, _judge_boom)) is False
 
 
 # ── project-task line parsing (ticktick client) ──────────────────────────
