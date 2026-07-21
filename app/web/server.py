@@ -283,7 +283,7 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
-_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag", "extract_model", "extract_effort", "system_prompt", "qwen_base_url")
+_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag", "extract_model", "extract_effort", "system_prompt", "qwen_base_url", "daily_summary")
 
 
 async def api_default_prompt(request: web.Request) -> web.Response:
