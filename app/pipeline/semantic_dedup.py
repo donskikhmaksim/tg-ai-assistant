@@ -67,16 +67,14 @@ async def decide_duplicate(
 ) -> bool:
     """Whether a new task should be treated as a duplicate of its best match.
 
-    Three bands (see config): ≥ high → duplicate automatically (no judge call);
-    ≤ low → distinct; in between → the gray zone, where `judge()` (a cheap LLM
-    yes/no) breaks the tie. BIAS TO SAFE: a false merge SKIPS creating the task,
-    i.e. drops a real one, so any uncertainty resolves to distinct — the judge is
-    only consulted in the gray band, and a judge that returns None or raises means
-    CREATE. Only the ≥ high band auto-merges without the judge."""
-    b = band(score, low, high)
-    if b == "duplicate":
-        return True
-    if b == "distinct":
+    ≤ low → distinct (fast, no judge). ABOVE low → ALWAYS confirm with the cheap
+    LLM `judge()` — we do NOT auto-merge on a high cosine anymore. A high cosine
+    is not proof: tasks differing only in a URL or a number are ~0.93+ yet
+    DISTINCT (e.g. 4 different Instagram reels, or "…декларация за 2025" vs
+    "…2026"), and a false merge SKIPS creating the task — dropping a real one.
+    BIAS TO SAFE: a judge that returns None or raises means DISTINCT (create).
+    `high` is kept for signature/config compatibility but no longer auto-merges."""
+    if score <= low:
         return False
     try:
         verdict = await judge()

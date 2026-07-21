@@ -152,9 +152,11 @@ async def _judge_boom():
     raise RuntimeError("judge unavailable")
 
 
-def test_decide_high_band_is_duplicate_without_judge():
-    # ≥ high → duplicate; the judge must NOT be consulted (would raise if it were).
-    assert _run(decide_duplicate(0.95, LOW, HIGH, _judge_boom)) is True
+def test_decide_high_band_still_consults_judge():
+    # A high cosine no longer auto-merges — the judge decides (URLs/numbers can be
+    # ≥high yet distinct). Judge yes → duplicate; judge no → distinct.
+    assert _run(decide_duplicate(0.95, LOW, HIGH, _judge_yes)) is True
+    assert _run(decide_duplicate(0.95, LOW, HIGH, _judge_no)) is False
 
 
 def test_decide_low_band_is_distinct_without_judge():
@@ -179,10 +181,11 @@ def test_decide_gray_judge_error_is_distinct():
     assert _run(decide_duplicate(0.87, LOW, HIGH, _judge_boom)) is False
 
 
-def test_decide_boundary_high_inclusive_low_inclusive():
-    # Exactly at high → duplicate (no judge); exactly at low → distinct (no judge).
-    assert _run(decide_duplicate(0.93, LOW, HIGH, _judge_boom)) is True
+def test_decide_boundary_low_inclusive():
+    # Exactly at low → distinct (no judge). Above low → judge decides.
     assert _run(decide_duplicate(0.83, LOW, HIGH, _judge_boom)) is False
+    assert _run(decide_duplicate(0.93, LOW, HIGH, _judge_yes)) is True
+    assert _run(decide_duplicate(0.93, LOW, HIGH, _judge_no)) is False
 
 
 # ── project-task line parsing (ticktick client) ──────────────────────────
