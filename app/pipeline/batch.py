@@ -478,7 +478,6 @@ async def _create_new_tasks(
     is_group = chat_id.startswith("group_")
     default_tz = get_settings().default_timezone
     date_by_id = {m["messageId"]: m.get("date") for m in (messages or [])}
-    link = _chat_link(chat_id)
 
     for t in new_tasks:
         title = (t.get("task") or "").strip()
@@ -553,6 +552,9 @@ async def _create_new_tasks(
             continue
         try:
             when = _source_time(t.get("source_message_ids"), date_by_id, default_tz)
+            # Deep-link to this task's source messages so the transcript page
+            # scrolls to and highlights exactly where it was discussed.
+            link = _chat_link(chat_id, t.get("source_message_ids"))
             note = _task_note(t, source, when=when, link=link, is_group=is_group, is_control=is_control)
             # «Контроль» items get a visible title marker + a tag in TickTick (the
             # stored `task` stays raw so dedup/matching are unaffected).
@@ -605,15 +607,20 @@ def _source_time(
         return None
 
 
-def _chat_link(chat_id: str) -> str | None:
+def _chat_link(chat_id: str, source_ids: list[int] | None = None) -> str | None:
     """Link to the transcript page for this chat (token-gated). None if no
-    WEBAPP_URL configured."""
+    WEBAPP_URL configured. When `source_ids` are given they're appended as
+    `&m=<id1>,<id2>` so the page highlights and scrolls to those messages."""
     s = get_settings()
     base = (s.webapp_url or "").rstrip("/")
     if not base:
         return None
     token = chat_link_token(chat_id, s.bot_token)
-    return f"{base}/chat?c={quote(chat_id)}&t={token}"
+    url = f"{base}/chat?c={quote(chat_id)}&t={token}"
+    ids = ",".join(str(i) for i in source_ids if i is not None) if source_ids else ""
+    if ids:
+        url += f"&m={quote(ids)}"
+    return url
 
 
 def _task_note(

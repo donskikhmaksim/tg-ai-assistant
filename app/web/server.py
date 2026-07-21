@@ -26,6 +26,7 @@ from ..telegram.notify import group_watch_announcement
 from ..tenancy import is_multi_tenant_allowed
 from ..ticktick.mcp_client import TickTickMCP
 from .auth import validate_init_data, verify_chat_token
+from .transcript import group_messages, initials, sender_color
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +86,102 @@ async def serve_app(_: web.Request) -> web.Response:
     return web.Response(text=page, content_type="text/html")
 
 
-def _local_dt(dt: Any, tz_name: str) -> str:
+def _zone_of(tz_name: str) -> Any:
     try:
-        zone = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
-        zone = timezone.utc
+        return timezone.utc
+
+
+def _fmt(dt: Any, zone: Any, pattern: str) -> str:
+    """Format a (UTC) datetime in `zone`; '' if it can't be formatted."""
     try:
-        return dt.astimezone(zone).strftime("%d.%m.%Y %H:%M")
+        return dt.astimezone(zone).strftime(pattern)
     except (ValueError, OSError, AttributeError):
         return ""
 
 
+def _parse_ids(raw: str) -> set[str]:
+    """Parse the `&m=1,2,3` source-message-id list into a set of strings."""
+    return {p for p in (raw or "").replace(" ", "").split(",") if p}
+
+
+def _render_group(grp: dict[str, Any], zone: Any, highlight: set[str]) -> tuple[str, str | None]:
+    """One Telegram-style message group (same side + sender). Returns the HTML
+    and the DOM id of the first highlighted bubble in it (or None)."""
+    side = "out" if grp["direction"] == "out" else "in"
+    sender = grp["senderName"]
+    color = sender_color(sender)
+    first_hl: str | None = None
+    msgs = grp["messages"]
+    bubbles = []
+    for idx, m in enumerate(msgs):
+        mid = str(m.get("messageId"))
+        is_hl = mid in highlight
+        if is_hl and first_hl is None:
+            first_hl = f"msg-{mid}"
+        cls = "msg " + side
+        if idx == len(msgs) - 1:
+            cls += " tail"
+        if is_hl:
+            cls += " highlight"
+        name_html = ""
+        if side == "in" and idx == 0 and sender:
+            name_html = f'<div class="name" style="color:{color}">{html.escape(sender)}</div>'
+        text = html.escape(m.get("text") or "")
+        when = _fmt(m.get("date"), zone, "%H:%M")
+        bubbles.append(
+            f'<div class="{cls}" id="msg-{html.escape(mid)}">{name_html}'
+            f'<div class="text">{text}</div>'
+            f'<div class="time">{html.escape(when)}</div></div>'
+        )
+    stack = f'<div class="stack">{"".join(bubbles)}</div>'
+    if side == "in":
+        display = sender or "—"
+        avatar = (
+            f'<div class="avatar" style="background:{color}" title="{html.escape(display)}">'
+            f'{html.escape(initials(sender))}</div>'
+        )
+        inner = avatar + stack
+    else:
+        inner = stack
+    return f'<div class="group {side}">{inner}</div>', first_hl
+
+
+def _render_transcript(
+    messages: list[dict[str, Any]], tz_name: str, highlight: set[str]
+) -> tuple[str, str | None]:
+    """Render the whole transcript: date dividers, then grouped bubbles.
+
+    All timestamps are shown in `tz_name` (the owner's zone). Returns the body
+    HTML and the DOM id to scroll to (first highlighted message, if any)."""
+    zone = _zone_of(tz_name)
+    # Bucket by local day first so a date divider never splits a message group.
+    buckets: list[tuple[str, list[dict[str, Any]]]] = []
+    for m in messages:
+        day = _fmt(m.get("date"), zone, "%d.%m.%Y")
+        if not buckets or buckets[-1][0] != day:
+            buckets.append((day, []))
+        buckets[-1][1].append(m)
+
+    first_hl: str | None = None
+    parts: list[str] = []
+    for day, day_msgs in buckets:
+        parts.append(f'<div class="day"><span>{html.escape(day)}</span></div>')
+        for grp in group_messages(day_msgs):
+            grp_html, hl = _render_group(grp, zone, highlight)
+            parts.append(grp_html)
+            if hl and first_hl is None:
+                first_hl = hl
+    body = "\n".join(parts) or '<div class="empty">Сообщений пока нет.</div>'
+    return body, first_hl
+
+
 async def serve_chat(request: web.Request) -> web.Response:
-    """Render a chat's stored transcript. Auth via the signed token in the URL
-    (so a plain link from a TickTick task works without Telegram initData)."""
+    """Render a chat's stored transcript, Telegram-style. Auth via the signed
+    token in the URL (so a plain link from a TickTick task works without
+    Telegram initData). An optional `&m=<id1>,<id2>` list highlights the task's
+    source messages and scrolls the page to the first of them."""
     chat_id = request.query.get("c", "")
     token = request.query.get("t", "")
     if not verify_chat_token(chat_id, token, get_settings().bot_token):
@@ -107,19 +190,15 @@ async def serve_chat(request: web.Request) -> web.Response:
     title = await repo.get_chat_title(chat_id)
     messages = await repo.get_chat_messages(chat_id)
     tz_name = get_settings().default_timezone
+    highlight = _parse_ids(request.query.get("m", ""))
 
-    rows = []
-    for m in messages:
-        when = _local_dt(m.get("date"), tz_name)
-        who = html.escape(m.get("senderName") or ("Я" if m.get("direction") == "out" else "—"))
-        cls = "out" if m.get("direction") == "out" else "in"
-        text = html.escape(m.get("text") or "")
-        rows.append(
-            f'<div class="msg {cls}"><div class="meta">{html.escape(when)} · {who}</div>'
-            f'<div class="text">{text}</div></div>'
-        )
-    body = "\n".join(rows) or '<div class="empty">Сообщений пока нет.</div>'
-    page = _CHAT_TEMPLATE.format(title=html.escape(title), body=body, count=len(messages))
+    body, anchor = _render_transcript(messages, tz_name, highlight)
+    page = _CHAT_TEMPLATE.format(
+        title=html.escape(title),
+        body=body,
+        count=len(messages),
+        anchor=anchor or "",
+    )
     return web.Response(text=page, content_type="text/html")
 
 
@@ -128,21 +207,56 @@ _CHAT_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Переписка — {title}</title>
 <style>
-  body {{ margin:0; padding:16px; max-width:760px; margin:0 auto;
-    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    background:#0f1115; color:#e8e8ea; }}
-  h1 {{ font-size:18px; margin:4px 0 2px; }}
-  .sub {{ color:#8a8f98; font-size:12px; margin-bottom:16px; }}
-  .msg {{ padding:8px 12px; margin:6px 0; border-radius:12px; background:#1b1e26; }}
-  .msg.out {{ background:#1d2b3a; }}
-  .meta {{ color:#8a8f98; font-size:11px; margin-bottom:3px; }}
-  .text {{ white-space:pre-wrap; word-break:break-word; }}
-  .empty {{ color:#8a8f98; text-align:center; margin-top:40px; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:#0e1621; color:#e9edf0;
+    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }}
+  .wrap {{ max-width:820px; margin:0 auto; padding:0 12px 48px; }}
+  .header {{ position:sticky; top:0; z-index:5; background:#17212b;
+    margin:0 -12px 6px; padding:12px 16px; border-bottom:1px solid #0b1219; }}
+  .header h1 {{ font-size:16px; margin:0; }}
+  .header .sub {{ color:#6d8296; font-size:12px; margin-top:2px; }}
+  .day {{ text-align:center; margin:16px 0 8px; }}
+  .day span {{ background:#1c2b3a; color:#c6d3de; font-size:12px;
+    padding:3px 10px; border-radius:12px; }}
+  .group {{ display:flex; align-items:flex-end; gap:8px; margin:2px 0; }}
+  .group.out {{ flex-direction:row-reverse; }}
+  .avatar {{ width:34px; height:34px; flex:0 0 34px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    color:#fff; font-size:13px; font-weight:600; }}
+  .stack {{ display:flex; flex-direction:column; max-width:76%; min-width:0; }}
+  .group.out .stack {{ align-items:flex-end; }}
+  .msg {{ position:relative; padding:6px 46px 7px 12px; margin:1px 0;
+    border-radius:14px; background:#182533; box-shadow:0 1px 1px rgba(0,0,0,.25); }}
+  .msg.out {{ background:#2b5278; }}
+  .msg.in.tail {{ border-bottom-left-radius:5px; }}
+  .msg.out.tail {{ border-bottom-right-radius:5px; }}
+  .msg .name {{ font-size:13px; font-weight:600; margin-bottom:2px; }}
+  .msg .text {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
+  .msg .time {{ position:absolute; right:10px; bottom:5px; font-size:10px;
+    color:#a7bccd; opacity:.8; }}
+  .msg.out .time {{ color:#cfe0f0; }}
+  .msg.highlight {{ background:#5a4b1c; box-shadow:0 0 0 2px #d8ad3e inset;
+    animation:flash 1.2s ease-out 1; }}
+  @keyframes flash {{ from {{ box-shadow:0 0 0 3px #ffdf7e inset; }}
+    to {{ box-shadow:0 0 0 2px #d8ad3e inset; }} }}
+  .empty {{ color:#6d8296; text-align:center; margin-top:48px; }}
 </style></head>
 <body>
-  <h1>{title}</h1>
-  <div class="sub">Сохранённая переписка · сообщений: {count}</div>
+  <div class="header">
+    <h1>{title}</h1>
+    <div class="sub">Сохранённая переписка · сообщений: {count}</div>
+  </div>
+  <div class="wrap">
   {body}
+  </div>
+  <script>
+    (function() {{
+      var a = "{anchor}";
+      if (!a) return;
+      var el = document.getElementById(a);
+      if (el) el.scrollIntoView({{block: "center"}});
+    }})();
+  </script>
 </body></html>"""
 
 
