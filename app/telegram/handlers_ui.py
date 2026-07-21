@@ -491,15 +491,13 @@ def _service_command(service: str, s) -> tuple[str, str] | None:
 
 
 async def _has_onboarding_access(uid: int | None) -> bool:
+    # NOT gated by the single-tenant lock: this grants access to the connector
+    # hand-out (a one-command install of the person's OWN, separate MCP servers
+    # for THEIR OWN Claude — see on_onboarding_pick). That's the self-host
+    # distribution model, not "serving them on THIS instance", so it stays open.
     if uid is None:
         return False
-    if await _is_owner(uid):
-        return True
-    # Single-tenant lock: an invite grants onboarding access only while the
-    # multi-tenant path is on. Locked instances onboard nobody but the owner.
-    if not is_multi_tenant_allowed():
-        return False
-    return await has_access(str(uid))
+    return await _is_owner(uid) or await has_access(str(uid))
 
 
 @router.message(Command("invite"))
@@ -509,12 +507,9 @@ async def cmd_invite(message: Message, bot: Bot) -> None:
     uid = message.from_user.id if message.from_user else None
     if not await _is_owner(uid):
         return  # silent for non-owners
-    if not is_multi_tenant_allowed():
-        # Single-tenant lock: inviting other people onto this instance is off.
-        await message.answer(
-            "Приглашения выключены: инстанс приватный (multi-tenant off)."
-        )
-        return
+    # NOT gated by the single-tenant lock: the invite delivers a self-host
+    # connector hand-out (setup for the invitee's OWN MCP servers), not access
+    # to this instance's data — so it stays available regardless of the lock.
     if not get_settings().notes_base_url:
         await message.answer("Не задан NOTES_BASE_URL — приглашения недоступны.")
         return
@@ -553,9 +548,8 @@ async def on_onboarding_invite(cb: CallbackQuery) -> None:
     if not await _is_owner(uid):
         await cb.answer("Только владелец может приглашать.", show_alert=True)
         return
-    if not is_multi_tenant_allowed():
-        await cb.answer("Приглашения выключены: инстанс приватный.", show_alert=True)
-        return
+    # NOT gated by the single-tenant lock — self-host connector hand-out (see
+    # cmd_invite): the invitee sets up their OWN MCP servers, not this instance.
     if not get_settings().notes_base_url:
         await cb.answer("Онбординг не настроен (нет NOTES_BASE_URL).", show_alert=True)
         return
@@ -719,13 +713,9 @@ async def cmd_start(
     # and drops the person straight onto the connector buttons.
     payload = (command.args or "").strip()
     if payload.startswith("inv_"):
-        if not is_multi_tenant_allowed():
-            # Single-tenant lock: don't onboard a second person even with a
-            # (stale) invite link. The instance is private.
-            await message.answer(
-                "Этот бот приватный — приглашения сейчас не действуют."
-            )
-            return
+        # NOT gated by the single-tenant lock: redeeming an invite only unlocks
+        # the self-host connector hand-out (buttons that install the invitee's
+        # OWN MCP servers), not access to this instance's data.
         if uid is not None and await redeem_invite(payload[4:], str(uid)):
             await message.answer(
                 "✅ Приглашение принято! Выбери, что подключить к своему Claude:",
