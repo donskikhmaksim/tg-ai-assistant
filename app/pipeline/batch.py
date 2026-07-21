@@ -181,10 +181,11 @@ async def _resolve_project(
     """Returns (projectId, projectName, sectionId) for a chat's tasks.
 
     Explicit binding wins (and may pin a section/column). Otherwise tasks fall
-    back to the configured default project (DEFAULT_PROJECT), resolved by name
-    to a real TickTick id so they actually land in an inbox instead of only
-    being stored locally. If the default name matches no project, we return
-    (None, name, None) and the task stays local until the chat is bound.
+    back to the default project: the per-user GLOBAL setting (DEFAULT_PROJECT_ID
+    set in the Mini App) takes priority, then the env default (DEFAULT_PROJECT_ID
+    / DEFAULT_PROJECT by name), resolved to a real TickTick id so they actually
+    land in an inbox instead of only being stored locally. If nothing matches we
+    return (None, name, None) and the task stays local until the chat is bound.
     Remote lookups use THIS owner's `tt` client; without one we can only use
     binding/env ids and otherwise keep the task local.
     """
@@ -197,33 +198,41 @@ async def _resolve_project(
         )
 
     s = get_settings()
+    g = await repo.get_global_settings()
     default_name = s.default_project
+    # Per-user global default (set in the Mini App) overrides the env default —
+    # important for self-host, where DEFAULT_SECTION=TG shouldn't be baked in.
+    default_id = (g.get("default_project_id") or s.default_project_id) or None
     # Prefer an explicit id (e.g. the built-in Inbox, which get_projects omits).
-    if s.default_project_id:
-        pid = s.default_project_id
-        return pid, default_name or "Inbox", await _resolve_default_section(pid, tt)
+    if default_id:
+        return default_id, default_name or "Inbox", await _resolve_default_section(default_id, tt, g)
     # Otherwise resolve the configured default project name to a real id.
     if default_name and tt is not None:
         try:
             for p in await tt.get_projects():
                 if p["name"] == default_name:
-                    return p["id"], p["name"], await _resolve_default_section(p["id"], tt)
+                    return p["id"], p["name"], await _resolve_default_section(p["id"], tt, g)
         except Exception:  # noqa: BLE001
             logger.exception("Default project lookup failed for %r", default_name)
     return None, default_name, None
 
 
-async def _resolve_default_section(project_id: str | None, tt: TickTickMCP | None) -> str | None:
+async def _resolve_default_section(
+    project_id: str | None, tt: TickTickMCP | None, global_doc: dict | None = None
+) -> str | None:
     """Column id of the configured default section inside `project_id`.
 
-    Unbound ("мои") tasks land in this section so they're easy to triage.
-    DEFAULT_SECTION_ID (an explicit column id) wins and bypasses the name
-    lookup — necessary for the built-in Inbox, whose columns the API won't list.
+    Unbound ("мои") tasks land in this section so they're easy to triage. The
+    per-user GLOBAL setting (DEFAULT_SECTION_ID set in the Mini App) wins, then
+    the env DEFAULT_SECTION_ID (an explicit column id) — both bypass the name
+    lookup, necessary for the built-in Inbox whose columns the API won't list.
     Otherwise the column is found by name (DEFAULT_SECTION). None if nothing
     matches or lookup fails — the task then goes to the project root."""
     s = get_settings()
-    if s.default_section_id:
-        return s.default_section_id
+    g = global_doc or {}
+    section_id = g.get("default_section_id") or s.default_section_id
+    if section_id:
+        return section_id
     name = s.default_section
     if not name or not project_id or tt is None:
         return None

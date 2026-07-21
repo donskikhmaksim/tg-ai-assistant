@@ -181,6 +181,17 @@
   </div>
 </div>
 
+<div class="overlay" id="inputOverlay">
+  <div class="sheet">
+    <div class="sheet-title" id="inputTitle">Название</div>
+    <input id="inputField" class="alias-input" type="text" autocomplete="off" />
+    <div class="sheet-actions">
+      <button class="sheet-apply" id="inputOk">Создать</button>
+      <button class="sheet-close" id="inputCancel">✕</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="promptOverlay">
   <div class="sheet">
     <div class="sheet-title">Встроенный базовый промпт</div>
@@ -243,6 +254,56 @@
     el.style.height = el.scrollHeight + "px";
   }
 
+  // Small inline text prompt (a reusable overlay; window.prompt is unreliable in
+  // the Telegram WebView). Resolves to the trimmed value, or null on cancel.
+  function promptName(titleText, okLabel) {
+    return new Promise(resolve => {
+      const ov = document.getElementById("inputOverlay");
+      const inp = document.getElementById("inputField");
+      const ok = document.getElementById("inputOk");
+      const cancel = document.getElementById("inputCancel");
+      document.getElementById("inputTitle").textContent = titleText;
+      ok.textContent = okLabel || "Создать";
+      inp.value = "";
+      ov.classList.add("show");
+      setTimeout(() => inp.focus(), 50);
+      function cleanup(val) {
+        ov.classList.remove("show");
+        ok.removeEventListener("click", onOk);
+        cancel.removeEventListener("click", onCancel);
+        inp.removeEventListener("keydown", onKey);
+        resolve(val);
+      }
+      function onOk() { cleanup(inp.value.trim() || null); }
+      function onCancel() { cleanup(null); }
+      function onKey(e) {
+        if (e.key === "Enter") { e.preventDefault(); onOk(); }
+        else if (e.key === "Escape") onCancel();
+      }
+      ok.addEventListener("click", onOk);
+      cancel.addEventListener("click", onCancel);
+      inp.addEventListener("keydown", onKey);
+    });
+  }
+
+  // Project <select> options, incl. the inline "➕ Новый проект…" entry.
+  function projectOptionsHtml(selectedId, placeholder) {
+    return `<option value="">${esc(placeholder)}</option>` +
+      allProjects.map(p =>
+        `<option value="${esc(p.id)}" ${p.id === selectedId ? "selected" : ""}>${esc(p.name)}</option>`
+      ).join("") +
+      `<option value="__new__">➕ Новый проект…</option>`;
+  }
+
+  // Section <select> options for a project's columns, incl. inline create.
+  function sectionOptionsHtml(secs, selectedId, placeholder) {
+    return `<option value="">${esc(placeholder)}</option>` +
+      secs.map(s =>
+        `<option value="${esc(s.id)}" data-name="${esc(s.name)}" ${s.id === selectedId ? "selected" : ""}>${esc(s.name)}</option>`
+      ).join("") +
+      `<option value="__new__">➕ Новый раздел…</option>`;
+  }
+
   // ── render ────────────────────────────────────────────────────────────────
 
   function render(data) {
@@ -297,6 +358,7 @@
         <span class="chat-chevron">▾</span>
       </div>
       <div class="chat-body">
+        ${buildDefaultProjectBlock()}
         ${buildModelBlock("__global__", true)}
         ${buildControlBlock("__global__", true)}
         ${buildSummaryBlock("__global__", true)}
@@ -304,7 +366,99 @@
         ${buildPromptOverrideBlock("__global__", true)}
         ${buildQwenBlock()}
       </div>`;
+    setTimeout(() => wireDefaultProject(card), 0);
     return card;
+  }
+
+  // ── Global default project + section (where unbound chats' tasks go) ────────
+
+  function buildDefaultProjectBlock() {
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">📥 Проект по умолчанию <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <div class="field-label">Проект для чатов без своей привязки</div>
+          <div class="select-wrap"><select class="def-proj-sel"></select></div>
+          <div class="select-wrap def-sect-wrap" style="display:none"><select class="def-sect-sel"></select></div>
+          <div class="field-hint">Задачи из непривязанных чатов летят сюда. Пусто — берётся значение из настроек деплоя (DEFAULT_PROJECT).</div>
+          <div class="saved-label def-saved"></div>
+        </div>
+      </div>`;
+  }
+
+  async function wireDefaultProject(card) {
+    const selP = card.querySelector(".def-proj-sel");
+    const selS = card.querySelector(".def-sect-sel");
+    const sectWrap = card.querySelector(".def-sect-wrap");
+    const saved = card.querySelector(".def-saved");
+    if (!selP) return;
+
+    let curProject = "", curSection = "";
+    try {
+      const doc = await api(`/api/settings?chatId=__global__`);
+      curProject = doc.default_project_id || "";
+      curSection = doc.default_section_id || "";
+    } catch {}
+
+    selP.innerHTML = projectOptionsHtml(curProject, "— как в деплое —");
+
+    async function loadSections(pid, selectedId) {
+      sectWrap.style.display = "block";
+      selS.innerHTML = `<option>— загрузка… —</option>`;
+      try {
+        const r = await api("/api/sections", {projectId: pid});
+        selS.innerHTML = sectionOptionsHtml(r.sections || [], selectedId, "— без раздела —");
+      } catch { sectWrap.style.display = "none"; }
+    }
+
+    if (curProject) loadSections(curProject, curSection);
+
+    selP.addEventListener("change", async () => {
+      if (selP.value === "__new__") {
+        const name = await promptName("Название нового проекта");
+        if (!name) { selP.value = curProject; return; }
+        saved.textContent = "Создаю проект…";
+        try {
+          const r = await api("/api/project", {name});
+          allProjects = r.projects || allProjects;
+          curProject = r.projectId;
+          refreshAllProjectSelects();
+          selP.value = r.projectId;
+        } catch (e) { saved.textContent = "Ошибка: " + e.message; selP.value = curProject; return; }
+      } else {
+        curProject = selP.value;
+      }
+      curSection = "";
+      saved.textContent = "Сохраняю…";
+      try {
+        await api("/api/settings", {chatId: "__global__", default_project_id: curProject, default_section_id: ""});
+        saved.textContent = curProject ? "✓ Сохранено" : "Сброшено";
+        toast("Сохранено");
+        if (curProject) await loadSections(curProject, null);
+        else sectWrap.style.display = "none";
+      } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    });
+
+    selS.addEventListener("change", async () => {
+      if (!curProject) return;
+      if (selS.value === "__new__") {
+        const name = await promptName("Название нового раздела");
+        if (!name) { selS.value = curSection; return; }
+        saved.textContent = "Создаю раздел…";
+        try {
+          const r = await api("/api/section", {projectId: curProject, name});
+          selS.innerHTML = sectionOptionsHtml(r.sections || [], r.sectionId, "— без раздела —");
+          selS.value = r.sectionId;
+        } catch (e) { saved.textContent = "Ошибка: " + e.message; selS.value = curSection; return; }
+      }
+      curSection = selS.value || "";
+      saved.textContent = "Сохраняю…";
+      try {
+        await api("/api/settings", {chatId: "__global__", default_project_id: curProject, default_section_id: curSection});
+        saved.textContent = "✓ Сохранено";
+        toast("Сохранено");
+      } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    });
   }
 
   // ── Chat card ─────────────────────────────────────────────────────────────
@@ -368,15 +522,11 @@
   // ── Project block ─────────────────────────────────────────────────────────
 
   function buildProjectBlock(c) {
-    const opts = [`<option value="">— не привязано —</option>`]
-      .concat(allProjects.map(p =>
-        `<option value="${esc(p.id)}" ${p.id === c.boundProjectId ? "selected":""}>${esc(p.name)}</option>`
-      )).join("");
     return `
       <div class="block">
         <div class="block-header open" onclick="toggleBlock(this)">📦 Проект и раздел <span class="bchev">▾</span></div>
         <div class="block-body">
-          <div class="select-wrap"><select class="proj-sel">${opts}</select></div>
+          <div class="select-wrap"><select class="proj-sel">${projectOptionsHtml(c.boundProjectId, "— не привязано —")}</select></div>
           <div class="select-wrap sect-wrap" style="display:none"><select class="sect-sel"></select></div>
           <div class="saved-label"></div>
         </div>
@@ -396,16 +546,11 @@
       try {
         const r = await api("/api/sections", {projectId: pid});
         const secs = r.sections || [];
-        if (!secs.length) { sectWrap.style.display = "none"; return; }
-        selS.innerHTML = `<option value="">— без раздела —</option>` +
-          secs.map(s => `<option value="${esc(s.id)}" ${s.id===selectedId?"selected":""}>${esc(s.name)}</option>`).join("");
+        selS.innerHTML = sectionOptionsHtml(secs, selectedId, "— без раздела —");
       } catch { sectWrap.style.display = "none"; }
     }
 
-    if (c.boundProjectId) loadSections(c.boundProjectId, c.boundSectionId);
-
-    selP.addEventListener("change", async () => {
-      const pid = selP.value;
+    async function bindProject(pid) {
       saved.textContent = "Сохраняю…";
       try {
         if (pid) {
@@ -420,10 +565,49 @@
         tg?.HapticFeedback?.notificationOccurred("success");
         toast("Сохранено");
       } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    }
+
+    if (c.boundProjectId) loadSections(c.boundProjectId, c.boundSectionId);
+
+    selP.addEventListener("change", async () => {
+      if (selP.value === "__new__") {
+        const name = await promptName("Название нового проекта");
+        if (!name) { selP.value = c.boundProjectId || ""; return; }
+        saved.textContent = "Создаю проект…";
+        try {
+          const r = await api("/api/project", {name});
+          allProjects = r.projects || allProjects;
+          c.boundProjectId = r.projectId;
+          refreshAllProjectSelects();
+          selP.value = r.projectId;
+          await bindProject(r.projectId);
+        } catch (e) {
+          saved.textContent = "Ошибка: " + e.message;
+          selP.value = c.boundProjectId || "";
+        }
+        return;
+      }
+      c.boundProjectId = selP.value || null;
+      await bindProject(selP.value);
     });
 
     selS.addEventListener("change", async () => {
       if (!selP.value) return;
+      if (selS.value === "__new__") {
+        const name = await promptName("Название нового раздела");
+        if (!name) { selS.value = c.boundSectionId || ""; return; }
+        saved.textContent = "Создаю раздел…";
+        try {
+          const r = await api("/api/section", {projectId: selP.value, name});
+          selS.innerHTML = sectionOptionsHtml(r.sections || [], r.sectionId, "— без раздела —");
+          selS.value = r.sectionId;
+        } catch (e) {
+          saved.textContent = "Ошибка: " + e.message;
+          selS.value = c.boundSectionId || "";
+          return;
+        }
+      }
+      c.boundSectionId = selS.value || null;
       saved.textContent = "Сохраняю…";
       try {
         const r = await api("/api/bind", {chatId: c.chatId, projectId: selP.value, sectionId: selS.value});
@@ -431,6 +615,19 @@
         tg?.HapticFeedback?.notificationOccurred("success");
         toast("Сохранено");
       } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    });
+  }
+
+  // After creating a project inline, refresh the option list of every open
+  // project <select> so the new project shows up everywhere (each keeps its
+  // own current selection).
+  function refreshAllProjectSelects() {
+    document.querySelectorAll("select.proj-sel, select.def-proj-sel").forEach(sel => {
+      const cur = sel.value;
+      const placeholder = sel.classList.contains("def-proj-sel")
+        ? "— как в деплое —" : "— не привязано —";
+      sel.innerHTML = projectOptionsHtml(cur === "__new__" ? "" : cur, placeholder);
+      sel.value = cur === "__new__" ? "" : cur;
     });
   }
 

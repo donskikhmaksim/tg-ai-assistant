@@ -6,7 +6,9 @@ The backend is the MCP *client*; Claude never touches MCP directly.
 Tool surface (confirmed against the ticktick-mcp source). The server merged the
 singular create/complete tools into array-based ones, so we call those:
   - get_projects() -> formatted text
+  - create_project(name) -> formatted text (echoes the new project + its id)
   - list_project_columns(project_id) -> formatted text   (sections / "разделы")
+  - create_project_column(project_id, name) -> formatted text (new column + id)
   - create_tasks(summary, tasks=[{title, project_id, content, due_date, column_id, ...}])
   - complete_tasks(summary, tasks=[{task_id, project_id}])
   - update_tasks(summary, tasks=[...])
@@ -50,6 +52,17 @@ _ID_RE = re.compile(r"^ID:\s*(\S+)\s*$", re.MULTILINE)
 def _first_id(text: str) -> str | None:
     m = _ID_RE.search(text)
     return m.group(1) if m else None
+
+
+def _any_id(text: str) -> str | None:
+    """First id in either shape the server emits: an `ID: <id>` line or a
+    parenthesised `(id: <id>)`. create_project / create_project_column echo the
+    created object as a formatted block whose id may be parenthesised (lowercase)
+    rather than an `ID:` line, so we tolerate both to recover the new id."""
+    if (mid := _first_id(text)) is not None:
+        return mid
+    m = _PAREN_ID_RE.search(text)
+    return m.group(1).strip() if m else None
 
 
 # Tolerant key/name parsing for both projects and columns.
@@ -169,6 +182,37 @@ class TickTickMCP:
 
     async def get_projects(self) -> list[dict[str, str]]:
         return _parse_projects(await self.call("get_projects", {}))
+
+    async def create_project(self, name: str) -> str | None:
+        """Create a new TickTick project and return its id (best-effort).
+
+        The server echoes the created project as a formatted block; we recover
+        the id from either the `ID:`/`(id: …)` line or, failing that, by looking
+        it up by name in get_projects. Returns None if it can't be resolved."""
+        text = await self.call("create_project", {"name": name})
+        pid = _any_id(text)
+        if pid:
+            return pid
+        for p in await self.get_projects():
+            if p["name"] == name:
+                return p["id"]
+        return None
+
+    async def create_project_column(self, project_id: str, name: str) -> str | None:
+        """Create a section (kanban column) inside a project and return its id.
+
+        Recovers the id from the tool's echoed block, falling back to a
+        list_project_columns lookup by name. Returns None if unresolved."""
+        text = await self.call(
+            "create_project_column", {"project_id": project_id, "name": name}
+        )
+        cid = _any_id(text)
+        if cid:
+            return cid
+        for c in await self.get_sections(project_id):
+            if c["name"] == name:
+                return c["id"]
+        return None
 
     async def get_sections(self, project_id: str) -> list[dict[str, str]]:
         """List a project's sections (TickTick columns). Empty if it has none."""
