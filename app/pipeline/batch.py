@@ -271,7 +271,7 @@ async def _create_new_tasks(
     smap: dict[str, Any] | None = None,
     tt: TickTickMCP | None = None,
     control_mode: str = "on",
-    control_marker: str = "👁 Контроль:",
+    control_marker: str = "👁",
     control_tag: str = "контроль",
 ) -> None:
     if not new_tasks:

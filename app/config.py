@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     control_mode: str = "on"  # on | off
     # How a «Контроль» item is marked in TickTick: a title prefix and a tag.
     # Both are overridable globally and per-chat. Empty → that marker is skipped.
-    control_marker: str = "👁 Контроль:"  # title prefix for control tasks
-    control_tag: str = "контроль"          # tag applied to control tasks
+    control_marker: str = "👁"     # title prefix for control tasks (just the eye)
+    control_tag: str = "контроль"  # tag applied to control tasks (carries the label)
 
     # Qwen via Ollama (Tier 1)
     qwen_base_url: str = "http://localhost:11434/v1"
