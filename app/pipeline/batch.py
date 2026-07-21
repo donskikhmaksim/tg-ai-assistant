@@ -87,8 +87,11 @@ async def process_chat(chat_id: str) -> None:
     extract_rules = settings_doc.get("extract_rules")
     importance = settings_doc.get("importance")
     people = settings_doc.get("people")
-    # «Контроль» attribution toggle: per-chat override, else global, else env default.
+    # «Контроль» attribution toggle + marker/tag: per-chat override, else global,
+    # else env default.
     control_mode = settings_doc.get("control_mode") or s.control_mode
+    control_marker = settings_doc.get("control_marker") or s.control_marker
+    control_tag = settings_doc.get("control_tag") or s.control_tag
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -132,7 +135,10 @@ async def process_chat(chat_id: str) -> None:
         )
 
     smap = await _resolve_section_map(chat_id)
-    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap, tt, control_mode)
+    await _create_new_tasks(
+        chat_id, result.get("new_tasks", []), messages, smap, tt,
+        control_mode, control_marker, control_tag,
+    )
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
     await _route_rejected(chat_id, result.get("rejected", []), messages, smap, tt)
 
@@ -249,6 +255,15 @@ def _control_decision(chat_id: str, who: str | None, control_mode: str) -> str:
     return "skip" if control_mode == "off" else "control"
 
 
+def _control_title(title: str, is_control: bool, marker: str) -> str:
+    """The TickTick title for a task: a «Контроль» item gets the configured
+    marker prefixed. An empty marker (user cleared it) leaves the title bare —
+    the tag still carries the signal."""
+    if is_control and marker:
+        return f"{marker} {title}"
+    return title
+
+
 async def _create_new_tasks(
     chat_id: str,
     new_tasks: list[dict[str, Any]],
@@ -256,6 +271,8 @@ async def _create_new_tasks(
     smap: dict[str, Any] | None = None,
     tt: TickTickMCP | None = None,
     control_mode: str = "on",
+    control_marker: str = "👁 Контроль:",
+    control_tag: str = "контроль",
 ) -> None:
     if not new_tasks:
         return
@@ -316,9 +333,10 @@ async def _create_new_tasks(
         try:
             when = _source_time(t.get("source_message_ids"), date_by_id, default_tz)
             note = _task_note(t, source, when=when, link=link, is_group=is_group, is_control=is_control)
-            # «Контроль» items get a visible title marker in TickTick (the stored
-            # `task` stays raw so dedup/matching are unaffected).
-            tt_title = f"👁 Контроль: {title}" if is_control else title
+            # «Контроль» items get a visible title marker + a tag in TickTick (the
+            # stored `task` stays raw so dedup/matching are unaffected).
+            tt_title = _control_title(title, is_control, control_marker)
+            tt_tags = [control_tag] if (is_control and control_tag) else None
             tt_id = await tt.create_task(
                 title=tt_title,
                 project_id=project_id,
@@ -326,6 +344,7 @@ async def _create_new_tasks(
                 due_date=to_ticktick_due(t.get("deadline"), t.get("deadline_tz"), default_tz),
                 section_id=section_id,
                 is_all_day=is_all_day_deadline(t.get("deadline")),
+                tags=tt_tags,
             )
             if tt_id:
                 await repo.set_task_ticktick_id(dedup, tt_id)

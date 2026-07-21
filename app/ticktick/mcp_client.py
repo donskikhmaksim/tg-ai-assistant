@@ -165,6 +165,7 @@ class TickTickMCP:
         due_date: str | None = None,
         section_id: str | None = None,
         is_all_day: bool = False,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         obj: dict[str, Any] = {"title": title, "project_id": project_id}
         if content:
@@ -175,6 +176,10 @@ class TickTickMCP:
             obj["is_all_day"] = True
         if section_id:
             obj["column_id"] = section_id
+        if tags:
+            # `tags` is a list of tag names; the server creates missing ones. Like
+            # column_id this is a v2 field the server accepts transparently.
+            obj["tags"] = tags
         return obj
 
     async def create_task(
@@ -186,13 +191,14 @@ class TickTickMCP:
         section_id: str | None = None,
         is_all_day: bool = False,
         summary: str | None = None,
+        tags: list[str] | None = None,
     ) -> str | None:
         """Create a single task via the array-based `create_tasks` tool (the
         singular `create_task` was merged into it). `create_tasks` does NOT echo
         the new id, so we recover it by searching for the exact title — otherwise
         the caller can't link it (breaks status-sync and makes re-pushes create
         duplicates). Returns the id, or None if it couldn't be found."""
-        task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day)
+        task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day, tags)
         text = await self.call(
             "create_tasks", {"summary": summary or title, "tasks": [task]}
         )

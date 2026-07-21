@@ -522,6 +522,11 @@
             </select>
           </div>
           <div class="field-hint">Только личка. Задачи на меня остаются моими. Группы не затрагиваются.</div>
+          <div class="field-label">Метка в заголовке TickTick</div>
+          <input class="control-marker" type="text" placeholder="👁 Контроль:" data-chat-id="${esc(chatId)}" />
+          <div class="field-label">Тег в TickTick</div>
+          <input class="control-tag" type="text" placeholder="контроль" data-chat-id="${esc(chatId)}" />
+          <div class="field-hint">Пусто — берётся значение из глобальных (или дефолт). Метку можно очистить в глобальных, если префикс не нужен.</div>
         </div>
       </div>`;
   }
@@ -589,6 +594,18 @@
           await saveField(controlSel.dataset.chatId, "control_mode", controlSel.value);
           toast("Сохранено");
         });
+      }
+      const markerInput = card.querySelector(".control-marker");
+      if (markerInput) {
+        markerInput.value = doc.control_marker || "";
+        markerInput.addEventListener("blur", () =>
+          saveField(markerInput.dataset.chatId, "control_marker", markerInput.value.trim()));
+      }
+      const tagInput = card.querySelector(".control-tag");
+      if (tagInput) {
+        tagInput.value = doc.control_tag || "";
+        tagInput.addEventListener("blur", () =>
+          saveField(tagInput.dataset.chatId, "control_tag", tagInput.value.trim()));
       }
     } catch (e) { console.warn("loadSettings failed", chatId, e); }
 
