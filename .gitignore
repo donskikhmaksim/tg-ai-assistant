@@ -9,3 +9,6 @@ venv/
 .mypy_cache/
 .DS_Store
 scripts/push_local_tasks.py
+
+# agent worktrees (never commit)
+.claude/worktrees/
