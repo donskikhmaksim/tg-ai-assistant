@@ -773,7 +773,9 @@ async def _apply_status_updates(
             # we just complete `done`, matching prior behavior).
             if new_status == "done":
                 try:
-                    await tt.complete_task(project_id=project_id, task_id=tt_id)
+                    await tt.complete_task(
+                        project_id=project_id, task_id=tt_id, title=task.get("task", "")
+                    )
                     logger.info("Chat %s: completed TickTick task '%s'", chat_id, task["task"])
                 except Exception:  # noqa: BLE001
                     logger.exception("Chat %s: TickTick complete_task failed", chat_id)

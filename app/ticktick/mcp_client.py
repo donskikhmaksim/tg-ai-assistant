@@ -391,12 +391,20 @@ class TickTickMCP:
         Returns the server's summary text."""
         return await self.call("create_tasks", {"summary": summary, "tasks": tasks})
 
-    async def complete_task(self, project_id: str, task_id: str) -> str:
-        """Complete a single task via the array-based `complete_tasks` tool."""
+    async def complete_task(
+        self, project_id: str, task_id: str, title: str = ""
+    ) -> str:
+        """Complete a single task via the array-based `complete_tasks` tool.
+
+        Pass `title` to arm the server's identity guard: it cross-checks the id
+        against the live task's title and REFUSES to complete a different task if
+        a stale id points elsewhere. Omitting it keeps the id-only behaviour."""
+        task: dict[str, Any] = {"task_id": task_id, "project_id": project_id}
+        if title:
+            task["title"] = title
         return await self.call(
             "complete_tasks",
-            {"summary": "Завершение задачи",
-             "tasks": [{"task_id": task_id, "project_id": project_id}]},
+            {"summary": "Завершение задачи", "tasks": [task]},
         )
 
 
