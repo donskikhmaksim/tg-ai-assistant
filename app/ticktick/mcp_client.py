@@ -261,14 +261,20 @@ class TickTickMCP:
         tags: list[str] | None = None,
     ) -> str | None:
         """Create a single task via the array-based `create_tasks` tool (the
-        singular `create_task` was merged into it). `create_tasks` does NOT echo
-        the new id, so we recover it by searching for the exact title — otherwise
-        the caller can't link it (breaks status-sync and makes re-pushes create
-        duplicates). Returns the id, or None if it couldn't be found."""
+        singular `create_task` was merged into it).
+
+        `create_tasks` now echoes the created id inline as `(id:<id>)` on the
+        result line, so we read it straight from the output — no title search.
+        The `find_task_id` fallback stays only as defence for an older server
+        build that doesn't emit the id yet; on the current server it's never hit.
+        Returns the id, or None if it couldn't be resolved."""
         task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day, tags)
         text = await self.call(
             "create_tasks", {"summary": summary or title, "tasks": [task]}
         )
+        m = _PAREN_ID_RE.search(text)
+        if m:
+            return m.group(1).strip()
         return _first_id(text) or await self.find_task_id(title)
 
     async def find_task_id(self, title: str) -> str | None:
