@@ -113,6 +113,9 @@ async def process_chat(chat_id: str) -> None:
     dedup_semantic = settings_doc.get("dedup_semantic") or s.dedup_semantic
     dedup_low = _as_float(settings_doc.get("dedup_low"), s.dedup_low)
     dedup_high = _as_float(settings_doc.get("dedup_high"), s.dedup_high)
+    # Multi-project routing: [{label, hint, project_id, section_id}] — the model
+    # classifies each task into a labelled destination; unlabelled → default.
+    routes = _valid_routes(settings_doc.get("routes"))
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -142,6 +145,7 @@ async def process_chat(chat_id: str) -> None:
         model=extract_model,
         effort=extract_effort,
         system_prompt=extract_system_prompt,
+        routes=[{"label": r["label"], "hint": r.get("hint")} for r in routes] or None,
     )
 
     # Memory first: persist the refreshed summary before raw expires.
@@ -168,11 +172,53 @@ async def process_chat(chat_id: str) -> None:
         sem_low=dedup_low,
         sem_high=dedup_high,
         sem_cap=s.dedup_project_task_cap,
+        routes=routes,
     )
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
     await _route_rejected(chat_id, result.get("rejected", []), messages, smap, tt)
 
     await repo.mark_processed(chat_id)
+
+
+def _valid_routes(raw: Any) -> list[dict[str, Any]]:
+    """Sanitise the `routes` setting into [{label, hint, project_id, section_id}].
+
+    Accepts only a list of dicts with a non-empty label AND project_id (a route
+    without a destination is meaningless). Labels are de-duplicated case-
+    insensitively (first wins) so the model can't be given an ambiguous menu.
+    Anything malformed is dropped — routing silently degrades to the default
+    binding rather than breaking extraction."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        label = str(r.get("label") or "").strip()
+        project_id = str(r.get("project_id") or "").strip()
+        if not label or not project_id or label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        out.append({
+            "label": label,
+            "hint": str(r.get("hint") or "").strip() or None,
+            "project_id": project_id,
+            "section_id": str(r.get("section_id") or "").strip() or None,
+        })
+    return out
+
+
+def _route_for(task: dict[str, Any], routes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The route whose label matches this task's `route` field (case-insensitive),
+    or None → the chat's default binding applies."""
+    label = str(task.get("route") or "").strip().lower()
+    if not label:
+        return None
+    for r in routes:
+        if r["label"].lower() == label:
+            return r
+    return None
 
 
 async def _resolve_project(
@@ -365,7 +411,7 @@ async def _build_semantic_dedup(
     chat_id: str,
     new_tasks: list[dict[str, Any]],
     open_tasks: list[dict[str, Any]],
-    project_id: str | None,
+    project_ids: list[str],
     tt: TickTickMCP | None,
     sem_mode: str,
     sem_cap: int,
@@ -401,20 +447,23 @@ async def _build_semantic_dedup(
     ]
     candidates = await _cached_candidates(chat_id, local_items, _local_candidate)
 
-    # Candidate 2: tasks already in the bound TickTick project (capped), cached
-    # under the project scope so multiple chats sharing a project reuse them.
-    if tt is not None and project_id:
-        proj_tasks = await tt.get_project_tasks(project_id, limit=sem_cap)
-        proj_items = [
-            (pt, f"tt:{pt['id']}", (pt.get("title") or "").strip())
-            for pt in proj_tasks[:sem_cap]
-            if pt.get("id") and (pt.get("title") or "").strip()
-        ]
-        candidates += await _cached_candidates(
-            f"proj:{project_id}",
-            proj_items,
-            lambda pt, emb: _project_candidate(pt, project_id, emb),
-        )
+    # Candidate 2: tasks already in the bound/routed TickTick projects (each
+    # capped), cached under the project scope so multiple chats sharing a
+    # project reuse them. With routing a chat compares against EVERY destination
+    # project, so a task can't dodge dedup by landing in a different route.
+    if tt is not None:
+        for pid in dict.fromkeys(p for p in project_ids if p):
+            proj_tasks = await tt.get_project_tasks(pid, limit=sem_cap)
+            proj_items = [
+                (pt, f"tt:{pt['id']}", (pt.get("title") or "").strip())
+                for pt in proj_tasks[:sem_cap]
+                if pt.get("id") and (pt.get("title") or "").strip()
+            ]
+            candidates += await _cached_candidates(
+                f"proj:{pid}",
+                proj_items,
+                lambda pt, emb, _pid=pid: _project_candidate(pt, _pid, emb),
+            )
 
     return candidates, title_vecs
 
@@ -466,10 +515,12 @@ async def _create_new_tasks(
     sem_low: float = 0.83,
     sem_high: float = 0.93,
     sem_cap: int = 200,
+    routes: list[dict[str, Any]] | None = None,
 ) -> None:
     if not new_tasks:
         return
     smap = smap or {"enabled": False}
+    routes = routes or []
     project_id, project_name, section_id = await _resolve_project(chat_id, tt)
     # Open (real) tasks ALWAYS fly. If a section is configured for "open", route
     # them there; otherwise keep the default section (never "nowhere").
@@ -479,9 +530,11 @@ async def _create_new_tasks(
 
     # Semantic near-duplicate guard (belt-and-suspenders on top of the exact-hash
     # index). Build the candidate set + query embeddings ONCE per chat; degrades
-    # to plain exact-hash dedup if embeddings are off/unavailable.
+    # to plain exact-hash dedup if embeddings are off/unavailable. Candidates
+    # span the default project AND every routed destination.
+    dedup_pids = [project_id] + [r["project_id"] for r in routes]
     matcher, title_vecs = await _build_semantic_dedup(
-        chat_id, new_tasks, open_tasks or [], project_id, tt, sem_mode, sem_cap
+        chat_id, new_tasks, open_tasks or [], dedup_pids, tt, sem_mode, sem_cap
     )
     chat_settings = await repo.get_chat_settings(chat_id)
     display_name = chat_settings.get("alias") or await repo.get_chat_title(chat_id)
@@ -500,6 +553,14 @@ async def _create_new_tasks(
             logger.info("Chat %s: control_mode=off, skipping counterparty task: %s", chat_id, title)
             continue
         is_control = decision == "control"
+
+        # Multi-project routing: a labelled task goes to its route's project
+        # (with the route's own section, NOT the default project's section map);
+        # unlabelled/unknown labels fall through to the chat's default binding.
+        route = _route_for(t, routes)
+        t_project_id = route["project_id"] if route else project_id
+        t_section_id = route["section_id"] if route else section_id
+        t_project_name = f"route:{route['label']}" if route else project_name
 
         # Semantic dedup: compare against the single best-matching existing task
         # (this chat's open tasks or the bound project) and decide by band —
@@ -533,7 +594,8 @@ async def _create_new_tasks(
             "sourceMessageIds": t.get("source_message_ids", []),
             "dedupHash": dedup,
             "ticktickTaskId": None,
-            "projectId": project_id,
+            "projectId": t_project_id,
+            "route": route["label"] if route else None,
             "createdAt": repo.utcnow(),
             "updatedAt": repo.utcnow(),
         }
@@ -548,7 +610,7 @@ async def _create_new_tasks(
             matcher.append({
                 "title": title, "embedding": qvec, "chatId": chat_id,
                 "details": t.get("details"), "dedupHash": dedup,
-                "ticktickTaskId": None, "projectId": project_id,
+                "ticktickTaskId": None, "projectId": t_project_id,
             })
             await repo.store_task_vectors(
                 chat_id, [{"key": dedup, "title": title, "embedding": qvec}]
@@ -558,7 +620,7 @@ async def _create_new_tasks(
         # only create remotely when a project is bound. No connector (tt is None)
         # means this owner hasn't connected their TickTick — keep the task local.
         # Either way the task is recorded locally and can be synced later.
-        if project_id is None or tt is None:
+        if t_project_id is None or tt is None:
             logger.info("Chat %s: task stored locally (no project/connector): %s", chat_id, title)
             continue
         try:
@@ -573,16 +635,16 @@ async def _create_new_tasks(
             tt_tags = [control_tag] if (is_control and control_tag) else None
             tt_id = await tt.create_task(
                 title=tt_title,
-                project_id=project_id,
+                project_id=t_project_id,
                 content=note,
                 due_date=to_ticktick_due(t.get("deadline"), t.get("deadline_tz"), default_tz),
-                section_id=section_id,
+                section_id=t_section_id,
                 is_all_day=is_all_day_deadline(t.get("deadline")),
                 tags=tt_tags,
             )
             if tt_id:
                 await repo.set_task_ticktick_id(dedup, tt_id)
-            logger.info("Chat %s: created TickTick task '%s' in %s", chat_id, title, project_name)
+            logger.info("Chat %s: created TickTick task '%s' in %s", chat_id, title, t_project_name)
         except Exception:  # noqa: BLE001
             logger.exception("Chat %s: TickTick create_task failed for '%s'", chat_id, title)
 

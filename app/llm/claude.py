@@ -138,6 +138,12 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "from_name": {"type": ["string", "null"]},
                     "to_name": {"type": ["string", "null"]},
                     "suggested_project": {"type": ["string", "null"]},
+                    "route": {
+                        "type": ["string", "null"],
+                        "description": "When a ROUTING section lists this chat's "
+                        "destinations, the label of the destination this task "
+                        "belongs to (exactly as listed), else null.",
+                    },
                     "source_message_ids": {"type": "array", "items": {"type": "integer"}},
                     "details": {"type": ["string", "null"]},
                 },
@@ -150,6 +156,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "from_name",
                     "to_name",
                     "suggested_project",
+                    "route",
                     "source_message_ids",
                     "details",
                 ],
@@ -235,6 +242,7 @@ def _build_user_prompt(
     summary: str,
     open_tasks: list[dict[str, Any]],
     retrieved: list[str] | None = None,
+    routes: list[dict[str, Any]] | None = None,
 ) -> str:
     open_lines = (
         "\n".join(
@@ -253,6 +261,21 @@ def _build_user_prompt(
             "(may pre-date it):\n"
             f"{joined}\n"
         )
+    routes_block = ""
+    if routes:
+        lines = "\n".join(
+            f"- \"{r['label']}\"" + (f" — {r['hint']}" if r.get("hint") else "")
+            for r in routes
+            if r.get("label")
+        )
+        routes_block = (
+            "\n# ROUTING\n"
+            "This chat files tasks into SEVERAL destinations. For EACH new task "
+            "decide which destination it belongs to by topic, and set its `route` "
+            "field to that label EXACTLY as written below. If none clearly fits, "
+            "set route to null (the task then goes to the chat's default).\n"
+            f"{lines}\n"
+        )
     return (
         "# CONVERSATION WINDOW\n"
         f"{window_text}\n\n"
@@ -262,6 +285,7 @@ def _build_user_prompt(
         "## Currently open tasks for this chat\n"
         f"{open_lines}\n"
         f"{retrieved_block}"
+        f"{routes_block}"
     )
 
 
@@ -303,13 +327,16 @@ async def extract(
     model: str | None = None,
     effort: str | None = None,
     system_prompt: str | None = None,
+    routes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """`model` is a per-chat/global alias (opus/sonnet/haiku); empty → env default.
     `effort` (low/medium/high/max) applies ONLY on the Anthropic API path — the CLI
-    shim does not forward it. `system_prompt` overrides the guidance body."""
+    shim does not forward it. `system_prompt` overrides the guidance body.
+    `routes` — this chat's multi-project destinations [{label, hint}]; when given,
+    the model classifies each new task into one via the `route` output field."""
     s = get_settings()
     system = _build_system(chat_context, extract_rules, importance, people, base_prompt=system_prompt)
-    user = _build_user_prompt(window_text, summary, open_tasks, retrieved)
+    user = _build_user_prompt(window_text, summary, open_tasks, retrieved, routes=routes)
 
     # Subscription path: run through the CLI shim (claude -p on a Mac mini). No
     # API fallback — on any failure we raise so the chat stays dirty and retries.

@@ -90,6 +90,20 @@
     .alias-input:focus { outline: none; border-color: var(--accent); }
     .field-hint { color: var(--hint); font-size: 12px; margin-top: 4px; }
 
+    .route-row {
+      border: 1px dashed var(--hint); border-radius: 10px;
+      padding: 8px 10px; margin: 8px 0; display: flex; flex-direction: column; gap: 6px;
+      position: relative;
+    }
+    .route-row .route-del {
+      position: absolute; top: 6px; right: 8px; border: none; background: none;
+      color: var(--hint); font-size: 16px; cursor: pointer; padding: 2px 6px;
+    }
+    .route-add {
+      width: 100%; padding: 8px; border-radius: 10px; border: 1px dashed var(--accent);
+      background: none; color: var(--accent); font-size: 14px; cursor: pointer; margin-top: 6px;
+    }
+
     .field-label { font-size: 12px; color: var(--hint); margin: 10px 0 3px; }
     .field-label:first-child { margin-top: 0; }
     textarea {
@@ -488,6 +502,7 @@
       </div>
       <div class="chat-body">
         ${buildProjectBlock(c)}
+        ${buildRoutesBlock()}
         ${buildSectionRoutingBlock(c)}
         ${buildModelBlock(c.chatId, false)}
         ${buildControlBlock(c.chatId, false)}
@@ -627,6 +642,128 @@
       const placeholder = sel.classList.contains("def-proj-sel")
         ? "— как в деплое —" : "— не привязано —";
       sel.innerHTML = projectOptionsHtml(cur === "__new__" ? "" : cur, placeholder);
+      sel.value = cur === "__new__" ? "" : cur;
+    });
+  }
+
+  // ── Multi-project routing (chat → several destinations by topic) ──────────
+
+  function buildRoutesBlock() {
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">🔀 Роутинг по темам <span class="bchev">▾</span></div>
+        <div class="block-body collapsed routes-body">
+          <div class="field-hint">Чат может раскладывать задачи в РАЗНЫЕ проекты по смыслу:
+            метка (например «работа», «личное») + подсказка, что к ней относится.
+            Задача без подходящей метки летит в проект из «Проект и раздел».</div>
+          <div class="routes-list"></div>
+          <button class="route-add" type="button">➕ Добавить направление</button>
+          <div class="saved-label routes-saved"></div>
+        </div>
+      </div>`;
+  }
+
+  function initRoutes(card, chatId, routes) {
+    const body = card.querySelector(".routes-body");
+    if (!body || body.dataset.wired) return;
+    body.dataset.wired = "1";
+    const list = body.querySelector(".routes-list");
+    const saved = body.querySelector(".routes-saved");
+
+    function collect() {
+      return [...list.querySelectorAll(".route-row")].map(row => ({
+        label: row.querySelector(".route-label").value.trim(),
+        hint: row.querySelector(".route-hint").value.trim(),
+        project_id: row.querySelector(".route-proj").value || "",
+        section_id: row.querySelector(".route-sect").value || "",
+      })).filter(r => r.label && r.project_id && r.project_id !== "__new__");
+    }
+
+    async function save() {
+      saved.textContent = "Сохраняю…";
+      try {
+        await api("/api/settings", { chatId, routes: collect() });
+        saved.textContent = "✓ Сохранено";
+        toast("Сохранено");
+      } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+    }
+
+    async function loadRowSections(row, pid, selectedId) {
+      const wrap = row.querySelector(".route-sect-wrap");
+      const sel = row.querySelector(".route-sect");
+      if (!pid) { wrap.style.display = "none"; return; }
+      wrap.style.display = "block";
+      sel.innerHTML = `<option>— загрузка… —</option>`;
+      try {
+        const r = await api("/api/sections", { projectId: pid });
+        sel.innerHTML = sectionOptionsHtml(r.sections || [], selectedId, "— без раздела —");
+        if (selectedId) sel.value = selectedId;
+      } catch { wrap.style.display = "none"; }
+    }
+
+    function addRow(route) {
+      const row = document.createElement("div");
+      row.className = "route-row";
+      row.innerHTML = `
+        <button class="route-del" type="button" title="Удалить">✕</button>
+        <div class="field-label">Метка</div>
+        <input class="alias-input route-label" placeholder="например: работа" value="${esc(route.label || "")}">
+        <div class="field-label">Что сюда относится (подсказка боту)</div>
+        <input class="alias-input route-hint" placeholder="например: Fix&amp;Roll, клиенты, ворота" value="${esc(route.hint || "")}">
+        <div class="field-label">Проект → раздел</div>
+        <div class="select-wrap"><select class="route-proj">${projectOptionsHtml(route.project_id || "", "— проект —")}</select></div>
+        <div class="select-wrap route-sect-wrap" style="display:none"><select class="route-sect"></select></div>`;
+      list.appendChild(row);
+
+      const selP = row.querySelector(".route-proj");
+      if (route.project_id) loadRowSections(row, route.project_id, route.section_id || null);
+
+      selP.addEventListener("change", async () => {
+        if (selP.value === "__new__") {
+          const name = await promptName("Название нового проекта");
+          if (!name) { selP.value = route.project_id || ""; return; }
+          try {
+            const r = await api("/api/project", { name });
+            allProjects = r.projects || allProjects;
+            refreshAllProjectSelects();
+            refreshRouteProjectSelects();
+            selP.value = r.projectId;
+          } catch (e) { saved.textContent = "Ошибка: " + e.message; selP.value = route.project_id || ""; return; }
+        }
+        route.project_id = selP.value;
+        await loadRowSections(row, selP.value, null);
+        await save();
+      });
+      row.querySelector(".route-sect").addEventListener("change", async (ev) => {
+        const sel = ev.target;
+        if (sel.value === "__new__") {
+          const name = await promptName("Название нового раздела");
+          if (!name || !selP.value) { sel.value = ""; return; }
+          try {
+            const r = await api("/api/section", { projectId: selP.value, name });
+            sel.innerHTML = sectionOptionsHtml(r.sections || [], r.sectionId, "— без раздела —");
+            sel.value = r.sectionId;
+          } catch (e) { saved.textContent = "Ошибка: " + e.message; sel.value = ""; return; }
+        }
+        await save();
+      });
+      row.querySelector(".route-label").addEventListener("blur", save);
+      row.querySelector(".route-hint").addEventListener("blur", save);
+      row.querySelector(".route-del").addEventListener("click", async () => {
+        row.remove();
+        await save();
+      });
+    }
+
+    (routes || []).forEach(addRow);
+    body.querySelector(".route-add").addEventListener("click", () => addRow({}));
+  }
+
+  // Refresh route-row project selects after an inline project create.
+  function refreshRouteProjectSelects() {
+    document.querySelectorAll("select.route-proj").forEach(sel => {
+      const cur = sel.value;
+      sel.innerHTML = projectOptionsHtml(cur === "__new__" ? "" : cur, "— проект —");
       sel.value = cur === "__new__" ? "" : cur;
     });
   }
@@ -909,6 +1046,7 @@
         ta.value = doc[ta.dataset.field] || "";
         autoResize(ta);
       });
+      initRoutes(card, chatId, doc.routes || []);
       const aliasInput = card.querySelector(".alias-input");
       if (aliasInput && doc.alias) aliasInput.value = doc.alias;
       const controlSel = card.querySelector(".control-sel");
