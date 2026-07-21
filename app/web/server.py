@@ -23,6 +23,7 @@ from .. import repositories as repo
 from ..config import get_settings
 from ..onboarding.ticktick_resolve import get_user_ticktick
 from ..telegram.notify import group_watch_announcement
+from ..tenancy import is_multi_tenant_allowed
 from ..ticktick.mcp_client import TickTickMCP
 from .auth import validate_init_data, verify_chat_token
 
@@ -48,7 +49,11 @@ async def _require_owner(request: web.Request) -> dict[str, Any]:
 
 async def _is_known_tenant(uid: int | None) -> bool:
     """True if this user owns a Business connection (multi-tenant) or is the
-    legacy primary owner, or no owner is known yet (bootstrap)."""
+    legacy primary owner, or no owner is known yet (bootstrap).
+
+    Single-tenant lock: while multi-tenant is OFF (the default) the Mini App
+    serves ONLY the primary owner (and the first user on a fresh deploy, who
+    bootstraps as that owner). A second user's Business connection is not enough."""
     if uid is None:
         return False
     primary = await repo.get_bot_state(OWNER_ID_KEY)
@@ -56,6 +61,8 @@ async def _is_known_tenant(uid: int | None) -> bool:
         return True  # fresh bot — allow bootstrap
     if int(primary) == uid:
         return True
+    if not is_multi_tenant_allowed():
+        return False
     return await repo.get_owner_connection_count(str(uid)) > 0
 
 
