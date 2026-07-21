@@ -228,6 +228,14 @@ class TickTickMCP:
             result = await session.call_tool(name, args)
             return _text(result)
 
+    @property
+    def _automation_key(self) -> str:
+        """The connection secret (last path segment of the MCP URL). The server
+        requires it on direct create_tasks to prove the caller is AUTOMATION —
+        interactive assistants don't know it and are routed through the
+        plan/approve manifest flow instead."""
+        return (self.url or "").rstrip("/").rsplit("/", 1)[-1]
+
     async def get_projects(self) -> list[dict[str, str]]:
         return _parse_projects(await self.call("get_projects", {}))
 
@@ -318,7 +326,9 @@ class TickTickMCP:
         Returns the id, or None if it couldn't be resolved."""
         task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day, tags)
         text = await self.call(
-            "create_tasks", {"summary": summary or title, "tasks": [task]}
+            "create_tasks",
+            {"summary": summary or title, "tasks": [task],
+             "automation_key": self._automation_key},
         )
         m = _PAREN_ID_RE.search(text)
         if m:
@@ -389,7 +399,11 @@ class TickTickMCP:
         """Create MANY tasks in ONE call. Each item is a task dict from
         `_task_obj` (title/project_id/content/due_date/column_id/is_all_day).
         Returns the server's summary text."""
-        return await self.call("create_tasks", {"summary": summary, "tasks": tasks})
+        return await self.call(
+            "create_tasks",
+            {"summary": summary, "tasks": tasks,
+             "automation_key": self._automation_key},
+        )
 
     async def complete_task(
         self, project_id: str, task_id: str, title: str = ""
