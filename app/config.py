@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     healthcheck_interval_min: int = 10  # how often to probe (catches new errors)
     healthcheck_hour: int = 9  # morning gate for the once-a-day repeat (default_timezone)
 
+    # End-of-day group summary. OFF by default — opt-in PER CHAT (or globally).
+    # A once-a-day cron posts INTO each group chat a short Russian recap of what
+    # the bot did that day for that chat: tasks it created and tasks it
+    # completed/updated (from the `tasks` collection, that chat + that local
+    # day). Only chats explicitly turned "on" (per-chat override, else global,
+    # else this env default) get one, and only when there was activity (empty
+    # days are skipped). Same override plumbing as control_mode. Posts only into
+    # GROUPS (chatId starts with "group_") — never personal chats. Time:
+    # summary_hour in default_timezone (owner tz).
+    daily_summary: str = "off"  # on | off
+    summary_hour: int = 19  # local hour (default_timezone) the summary is posted
+
     # Pipeline tuning
     batch_interval_min: int = 2  # scheduler tick; debounce (quiet_minutes) gates real work
     # Debounce: process a dirty chat only once it's been quiet for quiet_minutes

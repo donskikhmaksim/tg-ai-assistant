@@ -11,6 +11,7 @@ from aiogram.types import MenuButtonWebApp, WebAppInfo
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
+from .pipeline.summary import run_daily_summary
 from .pipeline.watchdog import run_watchdog
 from .repositories import init_global_defaults
 from .telegram.bot import build_bot, build_dispatcher
@@ -69,6 +70,24 @@ async def main() -> None:
             "Extraction watchdog scheduled: every %d min (daily repeat gated to %02d:00 %s)",
             settings.healthcheck_interval_min, settings.healthcheck_hour, settings.default_timezone,
         )
+
+    # End-of-day group summary: a daily cron at summary_hour in default_timezone
+    # posts a short recap into each opted-in group. OFF by default (per-chat /
+    # global toggle gates who actually receives one). Needs the bot to post.
+    scheduler.add_job(
+        run_daily_summary,
+        "cron",
+        hour=settings.summary_hour,
+        timezone=settings.default_timezone,
+        id="daily_summary",
+        max_instances=1,
+        coalesce=True,
+        kwargs={"bot": bot},
+    )
+    logger.info(
+        "Daily group summary scheduled: %02d:00 %s (opt-in per chat)",
+        settings.summary_hour, settings.default_timezone,
+    )
 
     # Phase-2 Mini App: HTTP server alongside polling (binds Railway's $PORT).
     web_runner = await start_web(bot)

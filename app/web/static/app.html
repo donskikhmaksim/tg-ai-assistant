@@ -288,6 +288,7 @@
       </div>
       <div class="chat-body">
         ${buildControlBlock("__global__", true)}
+        ${buildSummaryBlock("__global__", true)}
         ${buildPromptsBlock("__global__")}
       </div>`;
     return card;
@@ -322,6 +323,7 @@
         ${buildProjectBlock(c)}
         ${buildSectionRoutingBlock(c)}
         ${buildControlBlock(c.chatId, false)}
+        ${c.kind === "group" ? buildSummaryBlock(c.chatId, false) : ""}
         ${buildAliasBlock(c)}
         ${buildPromptsBlock(c.chatId)}
       </div>`;
@@ -531,6 +533,27 @@
       </div>`;
   }
 
+  // ── Daily summary block — end-of-day recap posted INTO the group ──────────
+
+  function buildSummaryBlock(chatId, isGlobal) {
+    const inherit = isGlobal ? "" : `<option value="">— как в глобальных —</option>`;
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">📋 Итог дня (группа) <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <div class="field-label">Публиковать в группе итог дня (создано / обновлено)</div>
+          <div class="select-wrap">
+            <select class="summary-sel" data-chat-id="${esc(chatId)}">
+              ${inherit}
+              <option value="off">Выключено (по умолчанию)</option>
+              <option value="on">Включено — постить в группу вечером</option>
+            </select>
+          </div>
+          <div class="field-hint">Только группы. Сообщение видят участники группы — в нём только заголовки задач. Пустые дни пропускаются.</div>
+        </div>
+      </div>`;
+  }
+
   // ── Alias block ───────────────────────────────────────────────────────────
 
   function buildAliasBlock(c) {
@@ -592,6 +615,16 @@
         controlSel.value = doc.control_mode || (hasInherit ? "" : "on");
         controlSel.addEventListener("change", async () => {
           await saveField(controlSel.dataset.chatId, "control_mode", controlSel.value);
+          toast("Сохранено");
+        });
+      }
+      const summarySel = card.querySelector(".summary-sel");
+      if (summarySel) {
+        // Global card has no "inherit" option → default the display to "off".
+        const hasInherit = !!summarySel.querySelector('option[value=""]');
+        summarySel.value = doc.daily_summary || (hasInherit ? "" : "off");
+        summarySel.addEventListener("change", async () => {
+          await saveField(summarySel.dataset.chatId, "daily_summary", summarySel.value);
           toast("Сохранено");
         });
       }

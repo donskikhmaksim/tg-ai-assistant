@@ -207,6 +207,49 @@ async def set_task_ticktick_id(dedup: str, ticktick_task_id: str) -> None:
     )
 
 
+async def get_tasks_created_between(
+    chat_id: str, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Tasks first created for a chat in [start, end) (UTC), oldest first.
+
+    Used by the end-of-day group summary. Bounds are UTC datetimes; the caller
+    converts the local day to UTC before calling.
+    """
+    db = get_db()
+    cursor = db.tasks.find(
+        {"chatId": chat_id, "createdAt": {"$gte": start, "$lt": end}}
+    ).sort("createdAt", 1)
+    return [d async for d in cursor]
+
+
+async def get_tasks_closed_between(
+    chat_id: str, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Tasks for a chat moved to done/cancelled in [start, end) (UTC).
+
+    "Closed" = status in (done, cancelled) with updatedAt in the window — i.e.
+    the bot completed/updated them that day. Used by the group summary.
+    """
+    db = get_db()
+    cursor = db.tasks.find(
+        {
+            "chatId": chat_id,
+            "status": {"$in": ["done", "cancelled"]},
+            "updatedAt": {"$gte": start, "$lt": end},
+        }
+    ).sort("updatedAt", 1)
+    return [d async for d in cursor]
+
+
+async def list_group_chat_ids() -> list[str]:
+    """chatIds of every group the bot has seen (chatId starts with "group_")."""
+    db = get_db()
+    cursor = db.chat_state.find(
+        {"chatId": {"$regex": "^group_"}}, {"chatId": 1}
+    )
+    return [d["chatId"] async for d in cursor]
+
+
 async def update_task_status(chat_id: str, dedup: str, new_status: str) -> dict[str, Any] | None:
     db = get_db()
     return await db.tasks.find_one_and_update(
