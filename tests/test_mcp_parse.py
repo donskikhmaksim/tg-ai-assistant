@@ -106,3 +106,19 @@ def test_find_task_id_none_when_no_match():
 
     tt.call = fake_call  # type: ignore[assignment]
     assert asyncio.run(tt.find_task_id("nope")) is None
+
+
+def test_find_task_id_exact_not_substring():
+    """A shorter search term must NOT link to a longer near-duplicate's id."""
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        return "- [Inbox] Составить ТЗ по помещению, дедлайн пт  (id:LONG123 proj:p)"
+
+    tt.call = fake_call  # type: ignore[assignment]
+    assert asyncio.run(tt.find_task_id("Составить ТЗ")) is None
+    # exact title still matches
+    async def fake_exact(name, args):
+        return "- [Inbox] Составить ТЗ  (id:EXACT9 proj:p)"
+    tt.call = fake_exact  # type: ignore[assignment]
+    assert asyncio.run(tt.find_task_id("Составить ТЗ")) == "EXACT9"

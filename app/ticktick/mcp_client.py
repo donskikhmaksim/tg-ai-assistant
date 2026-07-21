@@ -64,6 +64,10 @@ _BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
 # search_tasks format: "- [Project] <title>  (id:<id> proj:<pid>)" (no space
 # after id:, and "proj:" right after) — used to recover a freshly-created id.
 _SEARCH_ID_RE = re.compile(r"\(id:\s*(\S+?)\s+proj:", re.I)
+# search_tasks line: "- [Project] <title>  (id:<id> proj:<pid>)". Capture the
+# title so we can match it EXACTLY (a substring match would link a task to a
+# longer near-duplicate's id, e.g. "Составить ТЗ" → "Составить ТЗ, дедлайн пт").
+_SEARCH_TITLE_RE = re.compile(r"^[-*]\s*(?:\[[^\]]*\]\s*)?(.+?)\s*\(id:", re.I)
 # get_project_tasks / search_tasks task lines: "- [Project] <title>  (id:<id> ...)"
 # The optional "[...]" label and trailing "proj:<pid>" are tolerated.
 _TASK_LINE_RE = re.compile(
@@ -224,8 +228,11 @@ class TickTickMCP:
         return _first_id(text) or await self.find_task_id(title)
 
     async def find_task_id(self, title: str) -> str | None:
-        """Look up a task id by its exact title via search_tasks. Best-effort:
-        returns None if not found (e.g. the v2 cache hasn't settled yet)."""
+        """Look up a task id by its EXACT title via search_tasks. Best-effort:
+        returns None if no task with this exact title is found (e.g. the v2 cache
+        hasn't settled yet). Exact match — NOT substring: a substring match would
+        wrongly link a task to a longer near-duplicate's id, so two different docs
+        could share one ticktickTaskId."""
         try:
             raw = await self.call("search_tasks", {"search_term": title})
         except Exception:  # noqa: BLE001
@@ -233,10 +240,12 @@ class TickTickMCP:
             return None
         needle = title.strip().lower()
         for line in raw.splitlines():
-            if needle and needle in line.lower():
-                m = _SEARCH_ID_RE.search(line)
-                if m:
-                    return m.group(1)
+            m_id = _SEARCH_ID_RE.search(line)
+            if not m_id:
+                continue
+            m_title = _SEARCH_TITLE_RE.match(line.strip())
+            if m_title and m_title.group(1).strip().lower() == needle:
+                return m_id.group(1)
         return None
 
     async def get_project_tasks(
