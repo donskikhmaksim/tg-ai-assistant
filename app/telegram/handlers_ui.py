@@ -46,6 +46,7 @@ from ..config import get_settings
 from ..onboarding.invites import create_invite, has_access, redeem_invite
 from ..onboarding.notes import create_note
 from ..onboarding.ticktick_resolve import get_user_ticktick, set_user_mcp_url
+from ..tenancy import is_multi_tenant_allowed
 from .notify import group_watch_announcement
 
 logger = logging.getLogger(__name__)
@@ -108,10 +109,16 @@ async def _is_tenant(user_id: int | None) -> bool:
     """True if the actor is a tenant of this bot: the primary owner, or a user
     who has connected their own Business account. Before any owner is known we
     don't block (bootstrap). Non-tenants get the onboarding invite instead of
-    the management menu."""
+    the management menu.
+
+    Single-tenant lock: while multi-tenant is OFF (the default) only the primary
+    owner (handled by `_is_owner`, which also allows fresh-deploy bootstrap) is a
+    tenant — a second user's Business connection does NOT make them one."""
     if await _is_owner(user_id):
         return True
     if user_id is None:
+        return False
+    if not is_multi_tenant_allowed():
         return False
     return await repo.get_owner_connection_count(str(user_id)) > 0
 
@@ -358,6 +365,11 @@ async def cmd_connect(message: Message) -> None:
     uid = message.from_user.id if message.from_user else None
     if uid is None:
         return
+    if not await _is_tenant(uid):
+        # Single-tenant lock: this is a private instance — don't let a stranger
+        # register their own connector and be served here.
+        await message.answer("Этот бот приватный: подключение доступно только владельцу.")
+        return
     parts = (message.text or "").split(maxsplit=1)
     url = parts[1].strip() if len(parts) > 1 else ""
     if not url or "/mcp/" not in url:
@@ -481,7 +493,13 @@ def _service_command(service: str, s) -> tuple[str, str] | None:
 async def _has_onboarding_access(uid: int | None) -> bool:
     if uid is None:
         return False
-    return await _is_owner(uid) or await has_access(str(uid))
+    if await _is_owner(uid):
+        return True
+    # Single-tenant lock: an invite grants onboarding access only while the
+    # multi-tenant path is on. Locked instances onboard nobody but the owner.
+    if not is_multi_tenant_allowed():
+        return False
+    return await has_access(str(uid))
 
 
 @router.message(Command("invite"))
@@ -491,6 +509,12 @@ async def cmd_invite(message: Message, bot: Bot) -> None:
     uid = message.from_user.id if message.from_user else None
     if not await _is_owner(uid):
         return  # silent for non-owners
+    if not is_multi_tenant_allowed():
+        # Single-tenant lock: inviting other people onto this instance is off.
+        await message.answer(
+            "Приглашения выключены: инстанс приватный (multi-tenant off)."
+        )
+        return
     if not get_settings().notes_base_url:
         await message.answer("Не задан NOTES_BASE_URL — приглашения недоступны.")
         return
@@ -528,6 +552,9 @@ async def on_onboarding_invite(cb: CallbackQuery) -> None:
     uid = cb.from_user.id if cb.from_user else None
     if not await _is_owner(uid):
         await cb.answer("Только владелец может приглашать.", show_alert=True)
+        return
+    if not is_multi_tenant_allowed():
+        await cb.answer("Приглашения выключены: инстанс приватный.", show_alert=True)
         return
     if not get_settings().notes_base_url:
         await cb.answer("Онбординг не настроен (нет NOTES_BASE_URL).", show_alert=True)
@@ -692,6 +719,13 @@ async def cmd_start(
     # and drops the person straight onto the connector buttons.
     payload = (command.args or "").strip()
     if payload.startswith("inv_"):
+        if not is_multi_tenant_allowed():
+            # Single-tenant lock: don't onboard a second person even with a
+            # (stale) invite link. The instance is private.
+            await message.answer(
+                "Этот бот приватный — приглашения сейчас не действуют."
+            )
+            return
         if uid is not None and await redeem_invite(payload[4:], str(uid)):
             await message.answer(
                 "✅ Приглашение принято! Выбери, что подключить к своему Claude:",
