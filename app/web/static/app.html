@@ -286,7 +286,10 @@
         </div>
         <span class="chat-chevron">▾</span>
       </div>
-      <div class="chat-body">${buildPromptsBlock("__global__")}</div>`;
+      <div class="chat-body">
+        ${buildControlBlock("__global__", true)}
+        ${buildPromptsBlock("__global__")}
+      </div>`;
     return card;
   }
 
@@ -318,6 +321,7 @@
       <div class="chat-body">
         ${buildProjectBlock(c)}
         ${buildSectionRoutingBlock(c)}
+        ${buildControlBlock(c.chatId, false)}
         ${buildAliasBlock(c)}
         ${buildPromptsBlock(c.chatId)}
       </div>`;
@@ -501,6 +505,32 @@
     selects.forEach(sel => sel.addEventListener("change", save));
   }
 
+  // ── Control («Контроль») block — DM attribution toggle ────────────────────
+
+  function buildControlBlock(chatId, isGlobal) {
+    const inherit = isGlobal ? "" : `<option value="">— как в глобальных —</option>`;
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">👁 Контроль (личка) <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <div class="field-label">Действие на собеседнике (делегировал или сам вызвался)</div>
+          <div class="select-wrap">
+            <select class="control-sel" data-chat-id="${esc(chatId)}">
+              ${inherit}
+              <option value="on">Отмечать как «Контроль» (по умолчанию)</option>
+              <option value="off">Не создавать — только мои задачи</option>
+            </select>
+          </div>
+          <div class="field-hint">Только личка. Задачи на меня остаются моими. Группы не затрагиваются.</div>
+          <div class="field-label">Метка в заголовке TickTick</div>
+          <input class="control-marker" type="text" placeholder="👁 Контроль:" data-chat-id="${esc(chatId)}" />
+          <div class="field-label">Тег в TickTick</div>
+          <input class="control-tag" type="text" placeholder="контроль" data-chat-id="${esc(chatId)}" />
+          <div class="field-hint">Пусто — берётся значение из глобальных (или дефолт). Метку можно очистить в глобальных, если префикс не нужен.</div>
+        </div>
+      </div>`;
+  }
+
   // ── Alias block ───────────────────────────────────────────────────────────
 
   function buildAliasBlock(c) {
@@ -555,6 +585,28 @@
       });
       const aliasInput = card.querySelector(".alias-input");
       if (aliasInput && doc.alias) aliasInput.value = doc.alias;
+      const controlSel = card.querySelector(".control-sel");
+      if (controlSel) {
+        // Global card has no "inherit" option → default the display to "on".
+        const hasInherit = !!controlSel.querySelector('option[value=""]');
+        controlSel.value = doc.control_mode || (hasInherit ? "" : "on");
+        controlSel.addEventListener("change", async () => {
+          await saveField(controlSel.dataset.chatId, "control_mode", controlSel.value);
+          toast("Сохранено");
+        });
+      }
+      const markerInput = card.querySelector(".control-marker");
+      if (markerInput) {
+        markerInput.value = doc.control_marker || "";
+        markerInput.addEventListener("blur", () =>
+          saveField(markerInput.dataset.chatId, "control_marker", markerInput.value.trim()));
+      }
+      const tagInput = card.querySelector(".control-tag");
+      if (tagInput) {
+        tagInput.value = doc.control_tag || "";
+        tagInput.addEventListener("blur", () =>
+          saveField(tagInput.dataset.chatId, "control_tag", tagInput.value.trim()));
+      }
     } catch (e) { console.warn("loadSettings failed", chatId, e); }
 
     card.querySelectorAll("textarea[data-field]").forEach(ta => {

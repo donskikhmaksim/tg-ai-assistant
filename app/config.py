@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"
     anthropic_effort: str = "medium"  # low | medium | high | max
 
+    # «Контроль» attribution in DMs (fallback default; overridable globally and
+    # per-chat in the Mini App). "on" → a DM task whose action is on the
+    # counterparty (delegated or volunteered) becomes a «Контроль» item the owner
+    # only tracks; "off" → such tasks are not created at all (owner wants only
+    # their own to-dos). Groups are unaffected (from/to names handle them).
+    control_mode: str = "on"  # on | off
+    # How a «Контроль» item is marked in TickTick: a title prefix and a tag.
+    # Both are overridable globally and per-chat. Empty → that marker is skipped.
+    control_marker: str = "👁 Контроль:"  # title prefix for control tasks
+    control_tag: str = "контроль"          # tag applied to control tasks
+
     # Qwen via Ollama (Tier 1)
     qwen_base_url: str = "http://localhost:11434/v1"
     qwen_model: str = "qwen2.5:32b-instruct"
