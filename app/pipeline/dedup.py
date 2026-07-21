@@ -46,7 +46,15 @@ def to_ticktick_due(
         return None
     d = deadline.strip()
     if _DATE_RE.match(d):
-        return f"{d}T00:00:00+0000"
+        # All-day date: anchor to LOCAL midnight in the owner's zone, NOT UTC.
+        # Midnight-UTC is shown by a negative-offset account (e.g. Los Angeles)
+        # as the PREVIOUS day — the is_all_day flag does not reliably prevent it.
+        zone = _zone(tz) or _zone(default_tz) or timezone.utc
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=zone)
+        except ValueError:
+            return f"{d}T00:00:00+0000"
+        return dt.strftime("%Y-%m-%dT%H:%M:%S%z")
     if _LOCAL_DT_RE.match(d):
         d2 = d.replace(" ", "T")
         if d2.count(":") == 1:

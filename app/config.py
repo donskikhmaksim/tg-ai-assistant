@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     max_dirty_minutes: int = 45
     conv_gap_hours: int = 6
     max_lookback_hours: int = 48
-    raw_ttl_days: int = 30
+    raw_ttl_days: int = 90  # keep raw messages ~3 months (tiny: ~2MB/mo); db.py recreates the TTL index on change
     default_project: str = "Inbox"
     # TickTick id for the fallback project of unbound chats. The built-in Inbox
     # (id like "inbox<uid>") is NOT returned by get_projects, so it can only be
