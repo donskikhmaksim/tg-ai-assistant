@@ -33,39 +33,50 @@ def to_ticktick_due(
     tz: str | None = None,
     default_tz: str = DEFAULT_TIMEZONE,
 ) -> str | None:
-    """Format Claude's deadline into TickTick's ISO `YYYY-MM-DDThh:mm:ss+0000`.
+    """Format Claude's deadline into a TickTick ISO due string — ALWAYS in the
+    owner's home zone (`default_tz`, e.g. America/Los_Angeles). NEVER UTC.
 
-    - Bare date (YYYY-MM-DD): start-of-day; the task is also marked all-day (see
-      is_all_day_deadline), so the time/offset is irrelevant.
-    - Wall-clock datetime (YYYY-MM-DDThh:mm): interpreted in `tz` if the
-      conversation named a city/zone, otherwise in `default_tz` (the owner's
-      home zone, NOT UTC), and converted to the correct offset (DST-aware).
-    - Anything already carrying an offset is passed through untouched.
+    Bulletproof by construction: whatever Claude emits, the result is normalized
+    so TickTick shows the correct LOCAL day and time.
+      - bare date (YYYY-MM-DD)  -> LOCAL midnight in the owner's zone (all-day).
+      - wall-clock (…Thh:mm)    -> read in `tz` if the conversation named a zone,
+        else the owner's zone; then normalized to the owner's zone.
+      - offset-carrying / other -> parsed and CONVERTED (same instant) to the
+        owner's zone — so a stray UTC/offset can never leak through.
     """
     if not deadline:
         return None
     d = deadline.strip()
+    home = _zone(default_tz) or timezone.utc
     if _DATE_RE.match(d):
-        # All-day date: anchor to LOCAL midnight in the owner's zone, NOT UTC.
-        # Midnight-UTC is shown by a negative-offset account (e.g. Los Angeles)
-        # as the PREVIOUS day — the is_all_day flag does not reliably prevent it.
-        zone = _zone(tz) or _zone(default_tz) or timezone.utc
         try:
-            dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=zone)
+            dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=home)
         except ValueError:
-            return f"{d}T00:00:00+0000"
+            return None
         return dt.strftime("%Y-%m-%dT%H:%M:%S%z")
     if _LOCAL_DT_RE.match(d):
         d2 = d.replace(" ", "T")
         if d2.count(":") == 1:
             d2 += ":00"
-        zone = _zone(tz) or _zone(default_tz) or timezone.utc
+        # Named zone (if Claude gave one) keeps its own offset — TickTick renders
+        # it in the account's zone (LA) anyway, so the same instant shows as the
+        # correct LOCAL time. Otherwise it's already the owner's zone.
+        zone = _zone(tz) or home
         try:
             dt = datetime.strptime(d2, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=zone)
         except ValueError:
-            return d
+            return None
         return dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-    return d  # already a full timestamp with offset; pass through
+    # Full timestamp with an offset (or 'Z'), or any other ISO form Claude might
+    # emit — parse and pull it into the owner's zone. Unparseable → drop (better
+    # no deadline than a wrong/UTC one).
+    try:
+        dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=home)
+    return dt.astimezone(home).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def is_all_day_deadline(deadline: str | None) -> bool:
