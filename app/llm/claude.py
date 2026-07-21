@@ -394,6 +394,80 @@ async def _extract_via_cli(
     return _parse_json_loose(data.get("result") or "")
 
 
+# ── Gray-zone dedup judge ──────────────────────────────────────────────────
+# A cheap yes/no: are two task titles the SAME actionable task, just worded
+# differently? Used only for the semantic-dedup gray band. Deliberately tiny
+# (one call, a cheap model, no thinking) and FAIL-SAFE: any error returns None,
+# and the caller treats None as "distinct" so a real task is never dropped.
+
+_JUDGE_SYSTEM = (
+    "You compare two to-do task titles for a task manager. Decide whether they "
+    "are the SAME actionable task — the same thing to actually do — merely worded "
+    "differently or with extra detail (priority, deadline, a clarifying phrase). "
+    "Different actions, different objects, or different people are NOT the same. "
+    "Answer with a single word: yes or no."
+)
+
+# CLI-shim aliases map to concrete API model ids on the direct API path.
+_JUDGE_API_MODELS = {
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
+
+
+def _parse_yes_no(text: str) -> bool | None:
+    t = (text or "").strip().lower()
+    if t.startswith("yes"):
+        return True
+    if t.startswith("no"):
+        return False
+    return None
+
+
+async def judge_same_task(a: str, b: str) -> bool | None:
+    """True if `a` and `b` are the same actionable task, False if distinct, or
+    None when the judge is unavailable/errors. Callers MUST treat None as
+    distinct (create) — never merge on doubt. One tiny call; no API fallback on
+    the shim path (mirrors extract())."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return None
+    s = get_settings()
+    user = f"Task A: {a}\nTask B: {b}\n\nSame actionable task? Answer yes or no."
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": _JUDGE_SYSTEM,
+                "prompt": user,
+                "model": s.dedup_judge_model,
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=min(s.claude_cli_timeout, 60)) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                return None
+            return _parse_yes_no(data.get("result") or "")
+
+        model = _JUDGE_API_MODELS.get(s.dedup_judge_model)
+        if model is None:
+            # "opus" → the configured extraction model; anything else → literal id.
+            model = s.anthropic_model if s.dedup_judge_model == "opus" else s.dedup_judge_model
+        resp = await _get_client().messages.create(
+            model=model,
+            max_tokens=5,
+            thinking={"type": "disabled"},
+            system=_JUDGE_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = next((blk.text for blk in resp.content if blk.type == "text"), "")
+        return _parse_yes_no(text)
+    except Exception:  # noqa: BLE001 — fail safe: unknown → caller treats as distinct
+        logger.warning("judge_same_task failed", exc_info=True)
+        return None
+
+
 async def healthcheck() -> tuple[bool, str]:
     """Canary for the daily watchdog that exercises the SAME tier-2 path as
     extract(): the CLI shim when claude_cli_url is set (catches a dead shim, e.g.

@@ -18,11 +18,13 @@ from urllib.parse import quote
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..embeddings import embed
 from ..llm import claude, qwen
 from ..onboarding.ticktick_resolve import get_user_ticktick
 from ..ticktick.mcp_client import TickTickMCP
 from ..web.auth import chat_link_token
 from . import retrieve as retrieval
+from . import semantic_dedup as sd
 from .dedup import _zone, is_all_day_deadline, to_ticktick_due
 from .windows import build_window, render_window
 
@@ -46,6 +48,14 @@ def _build_chat_context(doc: dict) -> str:
 def _merge_settings(global_doc: dict, chat_doc: dict) -> dict:
     """Merge global defaults with per-chat settings (per-chat wins on non-empty values)."""
     return {**global_doc, **{k: v for k, v in chat_doc.items() if v}}
+
+
+def _as_float(value: Any, default: float) -> float:
+    """Parse a settings value (often a string from the Mini App) to float."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def run_batch() -> None:
@@ -99,6 +109,10 @@ async def process_chat(chat_id: str) -> None:
     extract_system_prompt = settings_doc.get("system_prompt") or s.system_prompt
     # Tier-1 endpoint (Mini App global, else env). Empty → tier-1 skipped entirely.
     qwen_base_url = settings_doc.get("qwen_base_url") or s.qwen_base_url
+    # Semantic near-duplicate dedup: per-chat override, else global, else env.
+    dedup_semantic = settings_doc.get("dedup_semantic") or s.dedup_semantic
+    dedup_low = _as_float(settings_doc.get("dedup_low"), s.dedup_low)
+    dedup_high = _as_float(settings_doc.get("dedup_high"), s.dedup_high)
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -149,6 +163,11 @@ async def process_chat(chat_id: str) -> None:
     await _create_new_tasks(
         chat_id, result.get("new_tasks", []), messages, smap, tt,
         control_mode, control_marker, control_tag,
+        open_tasks=open_tasks,
+        sem_mode=dedup_semantic,
+        sem_low=dedup_low,
+        sem_high=dedup_high,
+        sem_cap=s.dedup_project_task_cap,
     )
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
     await _route_rejected(chat_id, result.get("rejected", []), messages, smap, tt)
@@ -275,6 +294,153 @@ def _control_title(title: str, is_control: bool, marker: str) -> str:
     return title
 
 
+def _local_candidate(task: dict[str, Any], embedding: list[float]) -> dict[str, Any]:
+    """A semantic-dedup candidate from a local (Mongo) open task."""
+    return {
+        "title": task.get("task"),
+        "embedding": embedding,
+        "chatId": task.get("chatId"),
+        "details": task.get("details"),
+        "dedupHash": task.get("dedupHash"),
+        "ticktickTaskId": task.get("ticktickTaskId"),
+        "projectId": task.get("projectId"),
+    }
+
+
+def _project_candidate(
+    task: dict[str, str], project_id: str, embedding: list[float]
+) -> dict[str, Any]:
+    """A semantic-dedup candidate from a TickTick project task (no local doc)."""
+    return {
+        "title": task.get("title"),
+        "embedding": embedding,
+        "chatId": None,
+        "details": None,
+        "dedupHash": None,
+        "ticktickTaskId": task.get("id"),
+        "projectId": project_id,
+    }
+
+
+async def _cached_candidates(
+    scope: str,
+    items: list[tuple[dict[str, Any], str, str]],
+    make: Any,
+) -> list[dict[str, Any]]:
+    """Resolve embeddings for `items` = [(raw, cache_key, title), …] under one
+    cache `scope`, reusing stored vectors and embedding only new/changed titles
+    (one batched call), then persisting the fresh ones. `make(raw, embedding)`
+    builds each candidate. Fail-soft: items whose embedding can't be produced
+    are simply omitted."""
+    cache = await repo.get_task_vectors(scope)
+    candidates: list[dict[str, Any]] = []
+    to_embed: list[tuple[dict[str, Any], str, str]] = []
+    for raw, key, title in items:
+        cached = cache.get(key)
+        if cached and cached.get("title") == title and cached.get("embedding"):
+            candidates.append(make(raw, cached["embedding"]))
+        else:
+            to_embed.append((raw, key, title))
+    if to_embed:
+        vecs = await embed([title for _, _, title in to_embed])
+        if vecs and len(vecs) == len(to_embed):
+            store = []
+            for (raw, key, title), vec in zip(to_embed, vecs):
+                candidates.append(make(raw, vec))
+                store.append({"key": key, "title": title, "embedding": vec})
+            await repo.store_task_vectors(scope, store)
+    return candidates
+
+
+async def _build_semantic_dedup(
+    chat_id: str,
+    new_tasks: list[dict[str, Any]],
+    open_tasks: list[dict[str, Any]],
+    project_id: str | None,
+    tt: TickTickMCP | None,
+    sem_mode: str,
+    sem_cap: int,
+) -> tuple[list[dict[str, Any]] | None, dict[str, list[float]]]:
+    """Prepare the semantic near-duplicate check for one chat.
+
+    Returns (candidates, title_vectors). `candidates` is the list of existing
+    tasks (this chat's open tasks + the bound project's tasks) with embeddings,
+    or None when semantic dedup is off/unavailable (caller then relies on the
+    exact-hash guard only). `title_vectors` maps each new-task title to its query
+    embedding (a single batched call). If either the candidates or the query
+    embeddings can't be produced, we return (None, {}) so the pipeline degrades
+    cleanly to exact-hash dedup — never crashing a self-host without a model."""
+    if sem_mode == "off" or not get_settings().embed_model:
+        return None, {}
+
+    # Query embeddings for the new task titles (one batch).
+    uniq_titles = sorted({
+        (t.get("task") or "").strip() for t in new_tasks if (t.get("task") or "").strip()
+    })
+    if not uniq_titles:
+        return None, {}
+    qvecs = await embed(uniq_titles)
+    if not qvecs or len(qvecs) != len(uniq_titles):
+        return None, {}  # embeddings down → exact-hash fallback
+    title_vecs = dict(zip(uniq_titles, qvecs))
+
+    # Candidate 1: this chat's local open tasks (Mongo), cached under chatId.
+    local_items = [
+        (ot, ot["dedupHash"], (ot.get("task") or "").strip())
+        for ot in open_tasks
+        if (ot.get("task") or "").strip()
+    ]
+    candidates = await _cached_candidates(chat_id, local_items, _local_candidate)
+
+    # Candidate 2: tasks already in the bound TickTick project (capped), cached
+    # under the project scope so multiple chats sharing a project reuse them.
+    if tt is not None and project_id:
+        proj_tasks = await tt.get_project_tasks(project_id, limit=sem_cap)
+        proj_items = [
+            (pt, f"tt:{pt['id']}", (pt.get("title") or "").strip())
+            for pt in proj_tasks[:sem_cap]
+            if pt.get("id") and (pt.get("title") or "").strip()
+        ]
+        candidates += await _cached_candidates(
+            f"proj:{project_id}",
+            proj_items,
+            lambda pt, emb: _project_candidate(pt, project_id, emb),
+        )
+
+    return candidates, title_vecs
+
+
+async def _enrich_duplicate(
+    chat_id: str,
+    match: dict[str, Any],
+    new_task: dict[str, Any],
+    tt: TickTickMCP | None,
+) -> None:
+    """Best-effort enrichment of the existing task a new one duplicates. Appends
+    only genuinely-new detail: to the local Mongo doc (when the match is a local
+    task) and, if the task lives in TickTick, as a comment (append-only, so no
+    overwrite risk). Never raises — a failed enrich still means we skipped the
+    duplicate, which is the primary goal."""
+    extra = sd.merge_details(match.get("details"), new_task.get("details"))
+    if not extra:
+        return
+    if match.get("dedupHash") and match.get("chatId"):
+        try:
+            await repo.append_task_details(match["chatId"], match["dedupHash"], extra)
+        except Exception:  # noqa: BLE001
+            logger.exception("Chat %s: local task enrich failed", chat_id)
+    tt_id = match.get("ticktickTaskId")
+    project_id = match.get("projectId")
+    if tt is not None and tt_id and project_id:
+        try:
+            await tt.add_task_comment(project_id, tt_id, extra)
+        except Exception:  # noqa: BLE001 — enrich comment is best-effort
+            logger.debug(
+                "Chat %s: TickTick enrich comment failed (best-effort)",
+                chat_id, exc_info=True,
+            )
+
+
 async def _create_new_tasks(
     chat_id: str,
     new_tasks: list[dict[str, Any]],
@@ -284,6 +450,11 @@ async def _create_new_tasks(
     control_mode: str = "on",
     control_marker: str = "👁",
     control_tag: str = "контроль",
+    open_tasks: list[dict[str, Any]] | None = None,
+    sem_mode: str = "on",
+    sem_low: float = 0.83,
+    sem_high: float = 0.93,
+    sem_cap: int = 200,
 ) -> None:
     if not new_tasks:
         return
@@ -294,6 +465,13 @@ async def _create_new_tasks(
     open_section = _section_for(smap, "open")
     if open_section:
         section_id = open_section
+
+    # Semantic near-duplicate guard (belt-and-suspenders on top of the exact-hash
+    # index). Build the candidate set + query embeddings ONCE per chat; degrades
+    # to plain exact-hash dedup if embeddings are off/unavailable.
+    matcher, title_vecs = await _build_semantic_dedup(
+        chat_id, new_tasks, open_tasks or [], project_id, tt, sem_mode, sem_cap
+    )
     chat_settings = await repo.get_chat_settings(chat_id)
     display_name = chat_settings.get("alias") or await repo.get_chat_title(chat_id)
     source = _source_label(chat_id, display_name)
@@ -312,6 +490,26 @@ async def _create_new_tasks(
             logger.info("Chat %s: control_mode=off, skipping counterparty task: %s", chat_id, title)
             continue
         is_control = decision == "control"
+
+        # Semantic dedup: compare against the single best-matching existing task
+        # (this chat's open tasks or the bound project) and decide by band —
+        # ≥high auto-duplicate, ≤low distinct, gray zone asks the LLM judge.
+        # Bias to safe: any uncertainty → create (never drop a real task).
+        qvec = title_vecs.get(title) if matcher is not None else None
+        if matcher is not None and qvec is not None:
+            match = sd.best_match(qvec, matcher, sem_low)
+            if match is not None:
+                async def _judge(_title=title, _match_title=match.get("title")):
+                    return await claude.judge_same_task(_title, _match_title)
+
+                if await sd.decide_duplicate(match["score"], sem_low, sem_high, _judge):
+                    await _enrich_duplicate(chat_id, match, t, tt)
+                    logger.info(
+                        "Chat %s: semantic duplicate (%.3f) of %r — enriched, not creating: %s",
+                        chat_id, match["score"], match.get("title"), title,
+                    )
+                    continue
+
         dedup = repo.dedup_hash(chat_id, title)
         task_doc = {
             "chatId": chat_id,
@@ -333,6 +531,18 @@ async def _create_new_tasks(
         if not await repo.insert_task_if_new(task_doc):
             logger.debug("Chat %s: duplicate task skipped: %s", chat_id, title)
             continue
+
+        # Register the fresh task so later tasks in THIS batch dedup against it,
+        # and persist its embedding for cheap future runs.
+        if matcher is not None and qvec is not None:
+            matcher.append({
+                "title": title, "embedding": qvec, "chatId": chat_id,
+                "details": t.get("details"), "dedupHash": dedup,
+                "ticktickTaskId": None, "projectId": project_id,
+            })
+            await repo.store_task_vectors(
+                chat_id, [{"key": dedup, "title": title, "embedding": qvec}]
+            )
 
         # Push to TickTick. project_id=None means Inbox; we need a real id, so
         # only create remotely when a project is bound. No connector (tt is None)
