@@ -421,6 +421,7 @@ def _onboarding_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
+            [InlineKeyboardButton(text="🤖 Развернуть своего бота", callback_data="onb:assistant")],
         ]
     )
 
@@ -433,6 +434,7 @@ def _owner_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Добавить Google-аккаунт", callback_data="onb:add_google")],
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
+            [InlineKeyboardButton(text="🤖 Развернуть своего бота", callback_data="onb:assistant")],
         ]
     )
 
@@ -487,6 +489,15 @@ def _service_command(service: str, s) -> tuple[str, str] | None:
             f"--relay-secret {s.onboarding_relay_secret}"
         )
         return ("Google (Gmail / Drive / Docs / Sheets / Calendar)", cmd)
+    if service == "assistant":
+        # No owner-side secrets: the friend supplies their OWN BotFather token and
+        # Anthropic key as args (placeholders below), so this is always available.
+        cmd = (
+            f"bash <(curl -fsSL {s.onboarding_assistant_setup_url}) "
+            f"--bot-token <ТВОЙ_BOT_TOKEN_ОТ_BOTFATHER> "
+            f"--anthropic-key <ТВОЙ_ANTHROPIC_API_KEY>"
+        )
+        return ("Большой Брат — свой бот", cmd)
     return None
 
 
@@ -615,7 +626,7 @@ async def on_add_google(cb: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.in_({"onb:google", "onb:ticktick"}))
+@router.callback_query(F.data.in_({"onb:google", "onb:ticktick", "onb:assistant"}))
 async def on_onboarding_pick(cb: CallbackQuery) -> None:
     """Hand out one service's install command as a fresh 5-minute self-destruct note."""
     uid = cb.from_user.id if cb.from_user else None
@@ -626,7 +637,7 @@ async def on_onboarding_pick(cb: CallbackQuery) -> None:
     if not s.notes_base_url:
         await cb.answer("Онбординг не настроен владельцем.", show_alert=True)
         return
-    service = "google" if cb.data == "onb:google" else "ticktick"
+    service = cb.data.split(":", 1)[1]  # "google" | "ticktick" | "assistant"
     built = _service_command(service, s)
     if built is None:
         await cb.answer("Этот коннектор не настроен владельцем.", show_alert=True)

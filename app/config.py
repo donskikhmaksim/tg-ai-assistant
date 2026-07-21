@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     onboarding_ticktick_setup_url: str = "https://github.com/donskikhmaksim/ticktick-mcp/raw/main/scripts/setup.sh"
     onboarding_ticktick_client_id: str = ""
     onboarding_ticktick_client_secret: str = ""
+    # Self-deploy of THIS bot ("Большой Брат"). Unlike Google/TickTick it needs the
+    # friend's OWN secrets (BotFather token + Anthropic key), passed as script args,
+    # so there is nothing owner-side to configure — the button is always available.
+    onboarding_assistant_setup_url: str = "https://github.com/donskikhmaksim/tg-ai-assistant/raw/main/scripts/setup.sh"
     # Owner-only "add my own Google account" button. Full add-account URL on the
     # Google MCP dashboard, e.g.
     # https://<google-mcp>.up.railway.app/dashboard/<DASHBOARD_SECRET>/add
