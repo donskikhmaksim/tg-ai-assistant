@@ -64,6 +64,25 @@ _BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
 # search_tasks format: "- [Project] <title>  (id:<id> proj:<pid>)" (no space
 # after id:, and "proj:" right after) — used to recover a freshly-created id.
 _SEARCH_ID_RE = re.compile(r"\(id:\s*(\S+?)\s+proj:", re.I)
+# get_project_tasks / search_tasks task lines: "- [Project] <title>  (id:<id> ...)"
+# The optional "[...]" label and trailing "proj:<pid>" are tolerated.
+_TASK_LINE_RE = re.compile(
+    r"^[-*]\s*(?:\[[^\]]*\]\s*)?(.+?)\s*\(id:\s*(\S+?)(?:\s+proj:[^)]*)?\)\s*$", re.I
+)
+
+
+def _parse_task_lines(text: str) -> list[dict[str, str]]:
+    """Parse `- <title>  (id:<id> ...)` task lines into [{title, id}].
+
+    Tolerant of an optional `[Project]` label prefix and a trailing `proj:<pid>`.
+    Non-matching lines (headers, blanks) are ignored, so it degrades to [] on an
+    unrecognised format instead of raising."""
+    out: list[dict[str, str]] = []
+    for line in text.splitlines():
+        m = _TASK_LINE_RE.match(line.strip())
+        if m:
+            out.append({"title": m.group(1).strip(), "id": m.group(2).strip()})
+    return out
 
 
 def _parse_pairs(text: str) -> list[dict[str, str]]:
@@ -219,6 +238,33 @@ class TickTickMCP:
                 if m:
                     return m.group(1)
         return None
+
+    async def get_project_tasks(
+        self, project_id: str, limit: int = 200
+    ) -> list[dict[str, str]]:
+        """Open/active tasks in a project as [{title, id}] (best-effort).
+
+        Used by the semantic dedup to compare a new task against what's already
+        in the bound project. Capped at `limit` so a huge project can't blow up
+        the batch. Returns [] on any error or unrecognised output — the caller
+        then simply compares against the chat's local open tasks only."""
+        try:
+            raw = await self.call("get_project_tasks", {"project_id": project_id})
+        except Exception:  # noqa: BLE001 — dedup is best-effort
+            logger.exception("get_project_tasks failed for project %s", project_id)
+            return []
+        return _parse_task_lines(raw)[:limit]
+
+    async def add_task_comment(
+        self, project_id: str, task_id: str, content: str
+    ) -> str:
+        """Append a comment to an existing task (enrich, append-only — no
+        overwrite risk). Used when a new task is a semantic duplicate of one
+        already in TickTick."""
+        return await self.call(
+            "add_task_comment",
+            {"task_id": task_id, "project_id": project_id, "content": content},
+        )
 
     async def create_tasks(self, tasks: list[dict[str, Any]], summary: str) -> str:
         """Create MANY tasks in ONE call. Each item is a task dict from

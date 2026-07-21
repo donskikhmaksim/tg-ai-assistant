@@ -217,6 +217,66 @@ async def update_task_status(chat_id: str, dedup: str, new_status: str) -> dict[
 
 
 # ---------------------------------------------------------------------------
+# task_vectors (embedding cache for semantic near-duplicate dedup)
+#
+# Keyed by (scope, key) so both candidate sources share one cache:
+#   local open tasks  → scope = chatId,            key = task dedupHash
+#   TickTick project  → scope = "proj:<projectId>", key = "tt:<ticktickTaskId>"
+# `title` is the embedded text; a title change (re-word) invalidates the cache
+# (store_task_vectors overwrites), so future comparisons see the new phrasing.
+# Permanent (no TTL) — reuse keeps the per-run embedding cost tiny.
+# ---------------------------------------------------------------------------
+
+async def get_task_vectors(scope: str) -> dict[str, dict[str, Any]]:
+    """Cached embeddings for a scope, as {key: {title, embedding}}."""
+    db = get_db()
+    cursor = db.task_vectors.find(
+        {"scope": scope}, {"key": 1, "title": 1, "embedding": 1}
+    )
+    return {d["key"]: d async for d in cursor}
+
+
+async def store_task_vectors(scope: str, items: list[dict[str, Any]]) -> None:
+    """Upsert embedding rows. Each item: key, title, embedding."""
+    if not items:
+        return
+    db = get_db()
+    ops = [
+        UpdateOne(
+            {"scope": scope, "key": it["key"]},
+            {"$set": {
+                "scope": scope, "key": it["key"],
+                "title": it["title"], "embedding": it["embedding"],
+                "updatedAt": utcnow(),
+            }},
+            upsert=True,
+        )
+        for it in items
+    ]
+    await db.task_vectors.bulk_write(ops, ordered=False)
+
+
+async def append_task_details(chat_id: str, dedup: str, extra: str) -> bool:
+    """Append `extra` to a local task's details (enrich, never overwrite).
+
+    Returns True if the task existed and was updated. The new text goes on a
+    fresh paragraph after any existing details."""
+    db = get_db()
+    doc = await db.tasks.find_one(
+        {"chatId": chat_id, "dedupHash": dedup}, {"details": 1}
+    )
+    if doc is None:
+        return False
+    existing = (doc.get("details") or "").strip()
+    merged = f"{existing}\n\n{extra}".strip() if existing else extra
+    await db.tasks.update_one(
+        {"chatId": chat_id, "dedupHash": dedup},
+        {"$set": {"details": merged, "updatedAt": utcnow()}},
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # chat_summary (long-term memory)
 # ---------------------------------------------------------------------------
 

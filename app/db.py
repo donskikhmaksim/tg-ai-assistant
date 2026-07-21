@@ -79,3 +79,7 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase, raw_ttl_seconds: int) -> Non
     await db.message_vectors.create_index(
         [("chatId", ASCENDING), ("messageId", ASCENDING)], unique=True
     )
+    # Task-embedding cache for semantic near-duplicate dedup (also permanent).
+    await db.task_vectors.create_index(
+        [("scope", ASCENDING), ("key", ASCENDING)], unique=True
+    )

@@ -44,6 +44,22 @@ class Settings(BaseSettings):
     control_marker: str = "👁"     # title prefix for control tasks (just the eye)
     control_tag: str = "контроль"  # tag applied to control tasks (carries the label)
 
+    # Semantic near-duplicate detection (before creating a task). When "on" AND
+    # embeddings are available (embed_model set + reachable), a new task is
+    # compared by cosine similarity against existing OPEN tasks — the chat's own
+    # (Mongo) and the tasks already in the bound TickTick project — and, at or
+    # above `dedup_similarity`, treated as a DUPLICATE: the existing task is
+    # enriched (genuinely-new detail appended) instead of creating a second one.
+    # Falls back to the exact-title hash dedup when off or embeddings are down, so
+    # it never crashes a self-host without a local model. Both knobs are
+    # overridable globally and per-chat (like control_mode).
+    dedup_semantic: str = "on"          # on | off
+    dedup_similarity: float = 0.86      # cosine threshold for "same task"
+    # Cap on how many of the bound project's tasks are embedded/compared per run,
+    # so a huge project can't blow up latency. Stored embeddings are reused across
+    # runs; only new/changed task titles are re-embedded.
+    dedup_project_task_cap: int = 200
+
     # Qwen via Ollama (Tier 1)
     qwen_base_url: str = "http://localhost:11434/v1"
     qwen_model: str = "qwen2.5:32b-instruct"
