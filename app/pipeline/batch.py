@@ -72,7 +72,7 @@ async def process_chat(chat_id: str) -> None:
         await repo.mark_processed(chat_id)
         return
 
-    window_text = render_window(window)
+    window_text = render_window(window, s.default_timezone)
 
     # Archive embeddings for retrieval (dedup'd; permanent, survives raw TTL).
     await retrieval.index_messages(chat_id, messages)

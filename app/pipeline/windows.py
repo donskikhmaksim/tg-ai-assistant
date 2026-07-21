@@ -9,8 +9,9 @@ newest message. The result is the current live conversation, whole.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 def build_window(
@@ -43,11 +44,24 @@ def build_window(
     return window
 
 
-def render_window(messages: list[dict[str, Any]]) -> str:
-    """Human/LLM-readable transcript with direction, sender, time, message id."""
+def render_window(messages: list[dict[str, Any]], tz: str | None = None) -> str:
+    """Human/LLM-readable transcript with direction, sender, time, message id.
+
+    Timestamps are rendered in `tz` (the owner's zone, e.g. America/Los_Angeles)
+    so the extractor anchors relative dates ("сегодня"/"завтра") to LOCAL time,
+    not UTC. `date` is stored UTC; we convert on display."""
+    zone: ZoneInfo | None = None
+    if tz:
+        try:
+            zone = ZoneInfo(tz)
+        except Exception:  # noqa: BLE001
+            zone = None
     lines: list[str] = []
     for m in messages:
-        ts = m["date"].strftime("%Y-%m-%d %H:%M")
+        d = m["date"]
+        if zone is not None:
+            d = (d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d).astimezone(zone)
+        ts = d.strftime("%Y-%m-%d %H:%M")
         direction = m.get("direction", "in")
         sender = "me" if direction == "out" else (m.get("senderName") or "counterparty")
         text = (m.get("text") or "").replace("\n", " ").strip()
