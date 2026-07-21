@@ -65,7 +65,7 @@ def test_errors_are_independent():
 
 
 def test_collect_problems_returns_keys(monkeypatch):
-    async def q():
+    async def q(base_url=None):
         return (True, "")
 
     async def c():

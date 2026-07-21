@@ -62,7 +62,15 @@ async def collect_problems() -> list[tuple[str, str]]:
     """(key, raw_detail) per current failure, probed in pipeline order
     (tier-1 Qwen → tier-2 Claude → TickTick)."""
     problems: list[tuple[str, str]] = []
-    ok, detail = await qwen.healthcheck()
+    # Resolve the tier-1 endpoint the SAME way the pipeline does: Mini App global
+    # setting, else env. Empty → tier-1 is off and healthcheck skips (reports ok).
+    # Fail safe to env if the settings read isn't available (e.g. DB not ready).
+    try:
+        qwen_base_url = (await repo.get_global_settings()).get("qwen_base_url")
+    except Exception:  # noqa: BLE001
+        qwen_base_url = None
+    qwen_base_url = qwen_base_url or get_settings().qwen_base_url
+    ok, detail = await qwen.healthcheck(base_url=qwen_base_url)
     if not ok:
         problems.append(("qwen", detail))
     ok, detail = await claude.healthcheck()

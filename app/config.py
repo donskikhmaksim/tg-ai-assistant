@@ -33,6 +33,23 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"
     anthropic_effort: str = "medium"  # low | medium | high | max
 
+    # Per-chat/global EXTRACTION model + effort (Mini App overridable, empty =
+    # inherit the env default below). `extract_model` is a short alias
+    # ("opus"/"sonnet"/"haiku"): on the shim path it's forwarded as the `--model`
+    # alias, on the API path it maps to a concrete Anthropic model id (see
+    # claude.resolve_api_model). Empty → the shim uses CLAUDE_CLI_MODEL, the API
+    # uses ANTHROPIC_MODEL. `extract_effort` (low/medium/high/max) applies ONLY on
+    # the Anthropic API path (output_config.effort); the CLI shim does not forward
+    # effort. Empty → ANTHROPIC_EFFORT.
+    extract_model: str = ""   # ""=inherit | opus | sonnet | haiku
+    extract_effort: str = ""  # ""=inherit | low | medium | high | max
+
+    # Editable BASE extraction prompt (Mini App overridable, global + per-chat).
+    # Overrides claude.SYSTEM_PROMPT (the guidance body) when non-empty; the
+    # JSON-output/schema contract is ALWAYS appended by the backend regardless, so
+    # a bad override can't break the output format. Empty → the built-in default.
+    system_prompt: str = ""
+
     # «Контроль» attribution in DMs (fallback default; overridable globally and
     # per-chat in the Mini App). "on" → a DM task whose action is on the
     # counterparty (delegated or volunteered) becomes a «Контроль» item the owner
@@ -44,8 +61,12 @@ class Settings(BaseSettings):
     control_marker: str = "👁"     # title prefix for control tasks (just the eye)
     control_tag: str = "контроль"  # tag applied to control tasks (carries the label)
 
-    # Qwen via Ollama (Tier 1)
-    qwen_base_url: str = "http://localhost:11434/v1"
+    # Qwen via Ollama (Tier 1). OPTIONAL — empty by default so a fresh self-host
+    # deploy never tries to reach a localhost Ollama that isn't there. Empty →
+    # tier-1 triage is SKIPPED entirely: has_task() fails open (True) without any
+    # network call, so every window goes straight to Claude. Set it (globally or
+    # in the Mini App) to a reachable OpenAI-compatible endpoint to enable tier-1.
+    qwen_base_url: str = ""
     qwen_model: str = "qwen2.5:32b-instruct"
     qwen_api_key: str = "ollama"
 

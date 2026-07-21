@@ -31,15 +31,23 @@ TIER1_DEFAULT_SYSTEM = (
 
 _SYSTEM = TIER1_DEFAULT_SYSTEM
 
-_client: AsyncOpenAI | None = None
+# One client per distinct base_url. The endpoint is now configurable (Mini App
+# global setting → passed in by the pipeline), so we can't cache a single client.
+_clients: dict[str, AsyncOpenAI] = {}
 
 
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        s = get_settings()
-        _client = AsyncOpenAI(base_url=s.qwen_base_url, api_key=s.qwen_api_key)
-    return _client
+def _client_for(base_url: str) -> AsyncOpenAI:
+    client = _clients.get(base_url)
+    if client is None:
+        client = AsyncOpenAI(base_url=base_url, api_key=get_settings().qwen_api_key)
+        _clients[base_url] = client
+    return client
+
+
+def _resolve_base_url(base_url: str | None) -> str:
+    """Effective tier-1 endpoint: the caller-supplied value (from the Mini App
+    global setting) if given, else the env default. Empty → tier-1 disabled."""
+    return (base_url if base_url is not None else get_settings().qwen_base_url) or ""
 
 
 def _build_system(
@@ -63,11 +71,17 @@ async def has_task(
     chat_context: str = "",
     filter_rules: str | None = None,
     importance: str | None = None,
+    base_url: str | None = None,
 ) -> bool:
     s = get_settings()
+    endpoint = _resolve_base_url(base_url)
+    if not endpoint:
+        # Tier-1 disabled (no endpoint configured) → fail OPEN without any network
+        # call, so a fresh self-host deploy never spams a non-existent localhost.
+        return True
     system = _build_system(chat_context, filter_rules, importance)
     try:
-        resp = await _get_client().chat.completions.create(
+        resp = await _client_for(endpoint).chat.completions.create(
             model=s.qwen_model,
             messages=[
                 {"role": "system", "content": system},
@@ -83,13 +97,17 @@ async def has_task(
         return True
 
 
-async def healthcheck() -> tuple[bool, str]:
+async def healthcheck(base_url: str | None = None) -> tuple[bool, str]:
     """Honest tier-1 probe for the daily watchdog — does NOT fail open like
     has_task(). A minimal round-trip to the Qwen endpoint; returns (ok, detail).
-    """
+    When no endpoint is configured, tier-1 is intentionally OFF: skip the probe
+    and report ok (nothing to break)."""
     s = get_settings()
+    endpoint = _resolve_base_url(base_url)
+    if not endpoint:
+        return True, ""
     try:
-        resp = await _get_client().chat.completions.create(
+        resp = await _client_for(endpoint).chat.completions.create(
             model=s.qwen_model,
             messages=[
                 {"role": "system", "content": 'Respond with strict JSON only: {"has_task": false}.'},

@@ -92,6 +92,13 @@ async def process_chat(chat_id: str) -> None:
     control_mode = settings_doc.get("control_mode") or s.control_mode
     control_marker = settings_doc.get("control_marker") or s.control_marker
     control_tag = settings_doc.get("control_tag") or s.control_tag
+    # Per-chat/global extraction model + effort + editable base prompt: per-chat
+    # override, else global, else env/config default. Empty strings fall through.
+    extract_model = settings_doc.get("extract_model") or s.extract_model
+    extract_effort = settings_doc.get("extract_effort") or s.extract_effort
+    extract_system_prompt = settings_doc.get("system_prompt") or s.system_prompt
+    # Tier-1 endpoint (Mini App global, else env). Empty → tier-1 skipped entirely.
+    qwen_base_url = settings_doc.get("qwen_base_url") or s.qwen_base_url
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -99,6 +106,7 @@ async def process_chat(chat_id: str) -> None:
         chat_context=chat_context,
         filter_rules=filter_rules,
         importance=importance,
+        base_url=qwen_base_url,
     ):
         logger.info("Chat %s: Qwen says no task", chat_id)
         await repo.mark_processed(chat_id)
@@ -117,6 +125,9 @@ async def process_chat(chat_id: str) -> None:
         extract_rules=extract_rules,
         importance=importance,
         people=people,
+        model=extract_model,
+        effort=extract_effort,
+        system_prompt=extract_system_prompt,
     )
 
     # Memory first: persist the refreshed summary before raw expires.

@@ -102,6 +102,26 @@ TIER2_DEFAULT_SYSTEM = (
 
 SYSTEM_PROMPT = TIER2_DEFAULT_SYSTEM
 
+# Short model aliases (as chosen per-chat/global in the Mini App) → concrete
+# Anthropic API model ids for the direct-API path. The CLI shim takes the alias
+# verbatim (`claude -p --model <alias>`), so this mapping is only used when
+# running through the paid Anthropic API.
+_API_MODEL_BY_ALIAS = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
+
+
+def resolve_api_model(alias: str | None) -> str:
+    """Map a short model alias (opus/sonnet/haiku) to a concrete Anthropic API
+    model id. Empty/unknown → the configured ANTHROPIC_MODEL default."""
+    if alias:
+        mapped = _API_MODEL_BY_ALIAS.get(alias.strip().lower())
+        if mapped:
+            return mapped
+    return get_settings().anthropic_model
+
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -170,6 +190,36 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# A safe, empty-but-valid result. Returned when a parsed extraction fails the
+# shape check (see _is_valid_result) so a broken CUSTOM prompt degrades to "no
+# tasks this run" instead of creating garbage tasks. An empty updated_summary is
+# ignored by the pipeline (it only persists a truthy summary), so memory is kept.
+_EMPTY_RESULT: dict[str, Any] = {
+    "new_tasks": [],
+    "status_updates": [],
+    "rejected": [],
+    "updated_summary": "",
+}
+
+
+def _is_valid_result(result: Any) -> bool:
+    """Light shape guard for the parsed extraction result. The Anthropic API path
+    already enforces OUTPUT_SCHEMA via output_config.format, but the CLI shim does
+    NOT — so an editable/broken system_prompt could make the model emit the wrong
+    shape. Validate the load-bearing top-level contract (the task-producing lists)
+    so bad output is dropped rather than turned into tasks."""
+    if not isinstance(result, dict):
+        return False
+    new_tasks = result.get("new_tasks")
+    status_updates = result.get("status_updates")
+    if not isinstance(new_tasks, list) or not isinstance(status_updates, list):
+        return False
+    for t in new_tasks:
+        if not isinstance(t, dict) or not isinstance(t.get("task"), str):
+            return False
+    return True
+
+
 _client: AsyncAnthropic | None = None
 
 
@@ -220,9 +270,16 @@ def _build_system(
     extract_rules: str | None = None,
     importance: str | None = None,
     people: str | None = None,
+    base_prompt: str | None = None,
 ) -> str:
-    """Compose the final system prompt: default + optional context + optional rules."""
-    parts = [SYSTEM_PROMPT]
+    """Compose the final system prompt: base + optional context + optional rules.
+
+    `base_prompt` is the user's editable override of the built-in guidance body
+    (SYSTEM_PROMPT); empty/None → the default. This ONLY swaps the guidance text —
+    the JSON-output/schema contract is appended separately (output_config.format
+    on the API path, _CLI_OUTPUT_INSTRUCTION on the shim), so a bad override can't
+    remove the format contract."""
+    parts = [base_prompt.strip() if (base_prompt and base_prompt.strip()) else SYSTEM_PROMPT]
     if chat_context:
         parts.append(chat_context)
     if extract_rules:
@@ -243,33 +300,47 @@ async def extract(
     extract_rules: str | None = None,
     importance: str | None = None,
     people: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
+    """`model` is a per-chat/global alias (opus/sonnet/haiku); empty → env default.
+    `effort` (low/medium/high/max) applies ONLY on the Anthropic API path — the CLI
+    shim does not forward it. `system_prompt` overrides the guidance body."""
     s = get_settings()
-    system = _build_system(chat_context, extract_rules, importance, people)
+    system = _build_system(chat_context, extract_rules, importance, people, base_prompt=system_prompt)
     user = _build_user_prompt(window_text, summary, open_tasks, retrieved)
 
     # Subscription path: run through the CLI shim (claude -p on a Mac mini). No
     # API fallback — on any failure we raise so the chat stays dirty and retries.
     if s.claude_cli_url:
-        return await _extract_via_cli(s, system, user)
+        result = await _extract_via_cli(s, system, user, model)
+    else:
+        resp = await _get_client().messages.create(
+            model=resolve_api_model(model),
+            max_tokens=8000,
+            thinking={"type": "adaptive"},
+            output_config={
+                "effort": (effort or s.anthropic_effort),
+                "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
+            },
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user}],
+        )
+        # With structured output the model emits a JSON text block (after any
+        # thinking blocks). Grab the first text block.
+        text = next((b.text for b in resp.content if b.type == "text"), None)
+        if text is None:
+            raise ValueError(f"Claude returned no text block (stop_reason={resp.stop_reason})")
+        result = json.loads(text)
 
-    resp = await _get_client().messages.create(
-        model=s.anthropic_model,
-        max_tokens=8000,
-        thinking={"type": "adaptive"},
-        output_config={
-            "effort": s.anthropic_effort,
-            "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-        },
-        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": user}],
-    )
-    # With structured output the model emits a JSON text block (after any thinking
-    # blocks). Grab the first text block.
-    text = next((b.text for b in resp.content if b.type == "text"), None)
-    if text is None:
-        raise ValueError(f"Claude returned no text block (stop_reason={resp.stop_reason})")
-    return json.loads(text)
+    # Shape guard: a broken CUSTOM system_prompt (esp. on the shim, which has no
+    # schema enforcement) could yield the wrong shape. Degrade to "no tasks this
+    # run" instead of creating garbage.
+    if not _is_valid_result(result):
+        logger.warning("Extraction result failed shape validation; treating as no-tasks")
+        return dict(_EMPTY_RESULT)
+    return result
 
 
 # Schema description appended to the CLI prompt — the shim has no json_schema
@@ -301,11 +372,17 @@ def _parse_json_loose(text: str) -> dict[str, Any]:
         raise
 
 
-async def _extract_via_cli(s: Any, system: str, user: str) -> dict[str, Any]:
+async def _extract_via_cli(
+    s: Any, system: str, user: str, model: str | None = None
+) -> dict[str, Any]:
+    # `model` is the per-chat/global alias (opus/sonnet/haiku), forwarded verbatim
+    # as the shim's `--model` alias (claude_cli_model). Empty → CLAUDE_CLI_MODEL.
+    # NOTE: effort is intentionally NOT sent — the shim (`claude -p`) does not
+    # forward effort today, so per-chat effort only takes effect on the API path.
     payload = {
         "system": system,
         "prompt": user + _CLI_OUTPUT_INSTRUCTION,
-        "model": s.claude_cli_model,
+        "model": (model or s.claude_cli_model),
     }
     headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
     async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
