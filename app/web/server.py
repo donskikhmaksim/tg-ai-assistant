@@ -283,7 +283,15 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
-_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag")
+_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag", "extract_model", "extract_effort", "system_prompt", "qwen_base_url")
+
+
+async def api_default_prompt(request: web.Request) -> web.Response:
+    """GET /api/default-prompt — the built-in base extraction prompt, so the Mini
+    App can show "Посмотреть дефолтный" without hardcoding it."""
+    await _require_owner(request)
+    from ..llm import claude  # local import to avoid a heavy import at module load
+    return web.json_response({"prompt": claude.SYSTEM_PROMPT})
 
 
 async def api_get_settings(request: web.Request) -> web.Response:
@@ -333,6 +341,7 @@ def build_app(bot: Any) -> web.Application:
             web.post("/api/sections", api_sections),
             web.post("/api/bind", api_bind),
             web.post("/api/unbind", api_unbind),
+            web.get("/api/default-prompt", api_default_prompt),
             web.get("/api/settings", api_get_settings),
             web.post("/api/settings", api_save_settings),
             web.post("/api/settings/bulk", api_bulk_settings),

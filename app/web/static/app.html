@@ -181,6 +181,16 @@
   </div>
 </div>
 
+<div class="overlay" id="promptOverlay">
+  <div class="sheet">
+    <div class="sheet-title">Встроенный базовый промпт</div>
+    <pre id="promptText" style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;max-height:60vh;overflow-y:auto;background:var(--card);padding:12px;border-radius:10px;margin:0"></pre>
+    <div class="sheet-actions">
+      <button class="sheet-apply" onclick="closePromptView()">Закрыть</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const tg = window.Telegram?.WebApp;
   tg?.ready(); tg?.expand();
@@ -287,8 +297,11 @@
         <span class="chat-chevron">▾</span>
       </div>
       <div class="chat-body">
+        ${buildModelBlock("__global__", true)}
         ${buildControlBlock("__global__", true)}
         ${buildPromptsBlock("__global__")}
+        ${buildPromptOverrideBlock("__global__", true)}
+        ${buildQwenBlock()}
       </div>`;
     return card;
   }
@@ -321,9 +334,11 @@
       <div class="chat-body">
         ${buildProjectBlock(c)}
         ${buildSectionRoutingBlock(c)}
+        ${buildModelBlock(c.chatId, false)}
         ${buildControlBlock(c.chatId, false)}
         ${buildAliasBlock(c)}
         ${buildPromptsBlock(c.chatId)}
+        ${buildPromptOverrideBlock(c.chatId, false)}
       </div>`;
 
     setTimeout(() => { wireProjectSelects(card, c); wireSectionRouting(card, c); }, 0);
@@ -505,6 +520,97 @@
     selects.forEach(sel => sel.addEventListener("change", save));
   }
 
+  // ── Model + effort block ──────────────────────────────────────────────────
+
+  function buildModelBlock(chatId, isGlobal) {
+    const inheritLabel = isGlobal ? "По умолчанию (деплой)" : "— как в глобальных —";
+    const inheritOpt = `<option value="">${inheritLabel}</option>`;
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">🧠 Модель и усилие <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <div class="field-label">Модель извлечения</div>
+          <div class="select-wrap">
+            <select class="model-sel" data-chat-id="${esc(chatId)}">
+              ${inheritOpt}
+              <option value="opus">Opus (умнее, дороже)</option>
+              <option value="sonnet">Sonnet (баланс)</option>
+              <option value="haiku">Haiku (быстро, дёшево)</option>
+            </select>
+          </div>
+          <div class="field-label">Усилие (только на API-пути)</div>
+          <div class="select-wrap">
+            <select class="effort-sel" data-chat-id="${esc(chatId)}">
+              ${inheritOpt}
+              <option value="low">Низкое</option>
+              <option value="medium">Среднее</option>
+              <option value="high">Высокое</option>
+              <option value="max">Максимум</option>
+            </select>
+          </div>
+          <div class="field-hint">Пусто — берётся из глобальных (или из настроек деплоя). Усилие применяется только на прямом API Claude; на шиме (подписка) — нет.</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Editable base prompt override block ────────────────────────────────────
+
+  function buildPromptOverrideBlock(chatId, isGlobal) {
+    const hint = isGlobal
+      ? "Пусто — используется встроенный базовый промпт."
+      : "Пусто — берётся из глобальных (или встроенный по умолчанию).";
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">📝 Базовый промпт извлечения <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <textarea class="prompt-override" placeholder="Свой базовый промпт (перезаписывает встроенный)…"
+            data-field="system_prompt" data-chat-id="${esc(chatId)}" rows="1"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="bulk-btn" style="margin-top:0" onclick="viewDefaultPrompt(event)">👁 Посмотреть дефолтный</button>
+            <button class="bulk-btn" style="margin-top:0" onclick="resetPrompt(this,event)">↩︎ Вернуть дефолт</button>
+          </div>
+          <div class="field-hint">${hint} Контракт формата (JSON-схема) добавляется бэкендом всегда — сломать вывод нельзя.</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Qwen (tier-1) endpoint block — global only ─────────────────────────────
+
+  function buildQwenBlock() {
+    return `
+      <div class="block">
+        <div class="block-header" onclick="toggleBlock(this)">🔎 Первичный фильтр (Qwen) <span class="bchev">▾</span></div>
+        <div class="block-body collapsed">
+          <div class="field-label">Endpoint локальной модели (OpenAI-совместимый)</div>
+          <input class="qwen-input" type="text" placeholder="напр.: http://localhost:11434/v1" data-chat-id="__global__" />
+          <div class="field-hint">Пусто — тир-1 выключен, всё идёт сразу в Claude. Укажи адрес своей локальной модели, чтобы включить дешёвый предфильтр.</div>
+        </div>
+      </div>`;
+  }
+
+  async function viewDefaultPrompt(e) {
+    e.stopPropagation();
+    const box = document.getElementById("promptText");
+    box.textContent = "Загрузка…";
+    document.getElementById("promptOverlay").classList.add("show");
+    try {
+      const r = await api("/api/default-prompt");
+      box.textContent = r.prompt || "(пусто)";
+    } catch (err) { box.textContent = "Ошибка: " + err.message; }
+  }
+
+  function closePromptView() { document.getElementById("promptOverlay").classList.remove("show"); }
+
+  function resetPrompt(btn, e) {
+    e.stopPropagation();
+    const ta = btn.closest(".block-body").querySelector(".prompt-override");
+    if (!ta) return;
+    ta.value = "";
+    autoResize(ta);
+    saveField(ta.dataset.chatId, "system_prompt", "");
+    toast("Вернул дефолт");
+  }
+
   // ── Control («Контроль») block — DM attribution toggle ────────────────────
 
   function buildControlBlock(chatId, isGlobal) {
@@ -606,6 +712,28 @@
         tagInput.value = doc.control_tag || "";
         tagInput.addEventListener("blur", () =>
           saveField(tagInput.dataset.chatId, "control_tag", tagInput.value.trim()));
+      }
+      const modelSel = card.querySelector(".model-sel");
+      if (modelSel) {
+        modelSel.value = doc.extract_model || "";
+        modelSel.addEventListener("change", async () => {
+          await saveField(modelSel.dataset.chatId, "extract_model", modelSel.value);
+          toast("Сохранено");
+        });
+      }
+      const effortSel = card.querySelector(".effort-sel");
+      if (effortSel) {
+        effortSel.value = doc.extract_effort || "";
+        effortSel.addEventListener("change", async () => {
+          await saveField(effortSel.dataset.chatId, "extract_effort", effortSel.value);
+          toast("Сохранено");
+        });
+      }
+      const qwenInput = card.querySelector(".qwen-input");
+      if (qwenInput) {
+        qwenInput.value = doc.qwen_base_url || "";
+        qwenInput.addEventListener("blur", () =>
+          saveField(qwenInput.dataset.chatId, "qwen_base_url", qwenInput.value.trim()));
       }
     } catch (e) { console.warn("loadSettings failed", chatId, e); }
 
