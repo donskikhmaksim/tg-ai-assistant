@@ -102,6 +102,48 @@ def _parse_task_lines(text: str) -> list[dict[str, str]]:
     return out
 
 
+# get_project_tasks emits rich `Task N:` blocks, NOT bullets: a `Title:` line,
+# optional `Due Date:`/`Priority:`/`Status:`, a multi-line `Content:` section,
+# then a closing `(id: <id> | project: <pid>)` line. Parse the full card so the
+# semantic dedup / curation can weigh content + due, not just the title.
+_BLOCK_SPLIT_RE = re.compile(r"(?m)^Task\s+\d+:\s*$")
+_BLK_TITLE_RE = re.compile(r"(?m)^Title:\s*(.+?)\s*$")
+_BLK_DUE_RE = re.compile(r"(?m)^Due Date:\s*(.+?)\s*$")
+_BLK_PRIO_RE = re.compile(r"(?m)^Priority:\s*(.+?)\s*$")
+_BLK_STATUS_RE = re.compile(r"(?m)^Status:\s*(.+?)\s*$")
+_BLK_ID_RE = re.compile(r"\(id:\s*(\S+?)\s*\|\s*project:\s*([^)]+?)\)", re.I)
+_BLK_CONTENT_RE = re.compile(r"(?ms)^Content:\s*\n(.*?)(?=\n\(id:|\Z)")
+
+
+def _parse_project_cards(text: str) -> list[dict[str, str]]:
+    """Parse get_project_tasks' `Task N:` blocks into rich cards:
+    [{id, title, due, priority, status, content}] (missing fields omitted).
+
+    Falls back to the bullet parser (search_tasks shape) when no blocks are
+    present, so it copes with either output. Returns [] on anything unrecognised.
+    """
+    blocks = _BLOCK_SPLIT_RE.split(text)
+    cards: list[dict[str, str]] = []
+    for blk in blocks:
+        m_id = _BLK_ID_RE.search(blk)
+        m_title = _BLK_TITLE_RE.search(blk)
+        if not (m_id and m_title):
+            continue
+        card = {"id": m_id.group(1).strip(), "title": m_title.group(1).strip()}
+        if (m := _BLK_DUE_RE.search(blk)) and m.group(1).strip().lower() != "none":
+            card["due"] = m.group(1).strip()
+        if (m := _BLK_PRIO_RE.search(blk)) and m.group(1).strip().lower() != "none":
+            card["priority"] = m.group(1).strip()
+        if (m := _BLK_STATUS_RE.search(blk)):
+            card["status"] = m.group(1).strip()
+        if (m := _BLK_CONTENT_RE.search(blk)):
+            content = m.group(1).strip()
+            if content:
+                card["content"] = content
+        cards.append(card)
+    return cards or _parse_task_lines(text)
+
+
 def _parse_pairs(text: str) -> list[dict[str, str]]:
     """Parse a list of {name, id} from the server's formatted output.
 
@@ -301,7 +343,9 @@ class TickTickMCP:
     async def get_project_tasks(
         self, project_id: str, limit: int = 200
     ) -> list[dict[str, str]]:
-        """Open/active tasks in a project as [{title, id}] (best-effort).
+        """Open/active tasks in a project as rich cards [{id, title, due,
+        priority, status, content}] (best-effort; fields beyond id/title omitted
+        when absent).
 
         Used by the semantic dedup to compare a new task against what's already
         in the bound project. Capped at `limit` so a huge project can't blow up
@@ -312,7 +356,7 @@ class TickTickMCP:
         except Exception:  # noqa: BLE001 — dedup is best-effort
             logger.exception("get_project_tasks failed for project %s", project_id)
             return []
-        return _parse_task_lines(raw)[:limit]
+        return _parse_project_cards(raw)[:limit]
 
     async def add_task_comment(
         self, project_id: str, task_id: str, content: str

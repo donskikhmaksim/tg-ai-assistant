@@ -7,7 +7,7 @@ from app.pipeline.semantic_dedup import (
     decide_duplicate,
     merge_details,
 )
-from app.ticktick.mcp_client import _parse_task_lines
+from app.ticktick.mcp_client import _parse_project_cards, _parse_task_lines
 
 
 # ── cosine ────────────────────────────────────────────────────────────────
@@ -209,3 +209,52 @@ def test_parse_task_lines_plain_bullet():
 
 def test_parse_task_lines_ignores_headers_and_blanks():
     assert _parse_task_lines("Found 0 tasks:\n\n") == []
+
+
+# ── rich `Task N:` block parsing (get_project_tasks real format) ──────────
+_REAL_BLOCKS = (
+    "Found 2 tasks in project '⭐Personal':\n\n"
+    "Task 1:\n"
+    "Title: Проверить трафик CHP RV97124\n"
+    "Start Date: 2026-08-10T07:00:00.000+0000\n"
+    "Due Date: 2026-08-10T07:00:00.000+0000\n"
+    "Priority: High\n"
+    "Status: Active\n\n"
+    "Content:\n"
+    "Трафик выдан 7/3/26, CHP 215.\n"
+    "Дедлайн: 18 августа 2026.\n"
+    "(id: 6a4861848f0800bd4b30e74b | project: 699d03848f0853b739baf1ca)\n\n"
+    "Task 2:\n"
+    "Title: Напомнить Маше о возврате $2,000\n"
+    "Due Date: none\n"
+    "Priority: None\n"
+    "Status: Active\n"
+    "(id: 6a50ad507ebfd149c8ee1518 | project: 699d03848f0853b739baf1ca)\n"
+)
+
+
+def test_parse_project_cards_rich_block():
+    cards = _parse_project_cards(_REAL_BLOCKS)
+    assert len(cards) == 2
+    a, b = cards
+    assert a["id"] == "6a4861848f0800bd4b30e74b"
+    assert a["title"] == "Проверить трафик CHP RV97124"
+    assert a["due"] == "2026-08-10T07:00:00.000+0000"
+    assert a["priority"] == "High"
+    assert "Дедлайн: 18 августа 2026." in a["content"]
+    # closing id line must NOT bleed into content
+    assert "(id:" not in a["content"]
+    assert b["id"] == "6a50ad507ebfd149c8ee1518"
+    assert b["title"].startswith("Напомнить Маше")
+    # "none"/"None" sentinels are dropped, not stored
+    assert "due" not in b and "priority" not in b and "content" not in b
+
+
+def test_parse_project_cards_falls_back_to_bullets():
+    # No Task N: blocks → bullet (search_tasks) shape still parses.
+    text = "- [Inbox] Buy milk  (id:abc123 proj:inbox1)"
+    assert _parse_project_cards(text) == [{"title": "Buy milk", "id": "abc123"}]
+
+
+def test_parse_project_cards_empty():
+    assert _parse_project_cards("Found 0 tasks in project 'X':\n") == []

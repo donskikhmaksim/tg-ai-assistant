@@ -394,6 +394,47 @@ async def _extract_via_cli(
     return _parse_json_loose(data.get("result") or "")
 
 
+async def complete(
+    prompt: str,
+    system: str = "",
+    model: str | None = None,
+    max_tokens: int = 4000,
+) -> str | None:
+    """General one-shot completion via the SAME tier-2 path as extract(): the CLI
+    shim (subscription) when claude_cli_url is set, else the Anthropic API.
+
+    Returns the model's raw text, or None on any error (callers decide how to
+    degrade — never raises). Thinking disabled; no structured-output enforcement,
+    so the caller parses. `model` is an alias (opus/sonnet/haiku) or empty for the
+    env default. Used by one-off curation/analysis flows that need a plain
+    completion, not the task-extraction schema."""
+    s = get_settings()
+    try:
+        if s.claude_cli_url:
+            payload = {"system": system, "prompt": prompt,
+                       "model": (model or s.claude_cli_model)}
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                logger.warning("complete() shim error: %r", data.get("error"))
+                return None
+            return data.get("result") or ""
+        resp = await _get_client().messages.create(
+            model=resolve_api_model(model),
+            max_tokens=max_tokens,
+            thinking={"type": "disabled"},
+            system=system or "",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return next((b.text for b in resp.content if b.type == "text"), "")
+    except Exception:  # noqa: BLE001 — callers treat None as "unavailable"
+        logger.warning("complete() failed", exc_info=True)
+        return None
+
+
 # ── Gray-zone dedup judge ──────────────────────────────────────────────────
 # A cheap yes/no: are two task titles the SAME actionable task, just worded
 # differently? Used only for the semantic-dedup gray band. Deliberately tiny
@@ -401,10 +442,16 @@ async def _extract_via_cli(
 # and the caller treats None as "distinct" so a real task is never dropped.
 
 _JUDGE_SYSTEM = (
-    "You compare two to-do task titles for a task manager. Decide whether they "
-    "are the SAME actionable task — the same thing to actually do — merely worded "
-    "differently or with extra detail (priority, deadline, a clarifying phrase). "
-    "Different actions, different objects, or different people are NOT the same. "
+    "You compare two to-do task CARDS for a task manager. Each card may carry a "
+    "title plus extra fields (details/notes, due date, tags, project). Decide "
+    "whether they are the SAME actionable task — the same concrete thing to "
+    "actually do — merely worded differently or with extra detail. "
+    "Weigh ALL fields, not just the title: a difference in ANY distinguishing "
+    "detail means NOT the same — a different URL/link, a different number or "
+    "amount, a different date/period, a different object, place, or person. "
+    "(E.g. two 'watch this reel' cards with different links are DIFFERENT; "
+    "'декларация за 2025' vs 'за 2026' are DIFFERENT.) Conversely, the same "
+    "underlying action counts as the SAME even if titles are phrased differently. "
     "Answer with a single word: yes or no."
 )
 
@@ -428,12 +475,17 @@ async def judge_same_task(a: str, b: str) -> bool | None:
     """True if `a` and `b` are the same actionable task, False if distinct, or
     None when the judge is unavailable/errors. Callers MUST treat None as
     distinct (create) — never merge on doubt. One tiny call; no API fallback on
-    the shim path (mirrors extract())."""
+    the shim path (mirrors extract()).
+
+    `a`/`b` may be plain titles OR full multi-line task cards (title + details +
+    due + tags + project). Passing full cards is far more precise — the judge
+    weighs every field, so it won't merge two look-alike titles that differ only
+    in a URL/number/date buried in the details."""
     a, b = (a or "").strip(), (b or "").strip()
     if not a or not b:
         return None
     s = get_settings()
-    user = f"Task A: {a}\nTask B: {b}\n\nSame actionable task? Answer yes or no."
+    user = f"Task A:\n{a}\n\nTask B:\n{b}\n\nSame actionable task? Answer yes or no."
     try:
         if s.claude_cli_url:
             payload = {
