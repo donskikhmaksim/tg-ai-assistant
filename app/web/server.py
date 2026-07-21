@@ -328,6 +328,55 @@ async def api_sections(request: web.Request) -> web.Response:
     return web.json_response({"sections": sections})
 
 
+async def api_create_project(request: web.Request) -> web.Response:
+    """POST /api/project {name} — create a new TickTick project (inline create
+    from the project picker). Returns the refreshed project list + the new id so
+    the Mini App can auto-select it as the binding."""
+    data = await _require_owner(request)
+    tt = await _tt_for(data)
+    if tt is None:
+        return web.json_response({"error": "ticktick_not_connected"}, status=409)
+    body = await request.json()
+    name = ((body or {}).get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "name required"}, status=400)
+    try:
+        project_id = await tt.create_project(name)
+        projects = await tt.get_projects()
+    except Exception:  # noqa: BLE001
+        logger.exception("create_project failed for %r", name)
+        return web.json_response({"error": "ticktick_unreachable"}, status=502)
+    if not project_id:
+        return web.json_response({"error": "create_failed"}, status=502)
+    logger.info("Mini App: created project %r -> %s", name, project_id)
+    return web.json_response({"ok": True, "projectId": project_id, "projects": projects})
+
+
+async def api_create_section(request: web.Request) -> web.Response:
+    """POST /api/section {projectId, name} — create a new section (kanban column)
+    inside a project (inline create from the section picker). Returns the
+    refreshed section list + the new id so the Mini App can auto-select it."""
+    data = await _require_owner(request)
+    tt = await _tt_for(data)
+    if tt is None:
+        return web.json_response({"error": "ticktick_not_connected"}, status=409)
+    body = await request.json()
+    project_id = (body or {}).get("projectId")
+    name = ((body or {}).get("name") or "").strip()
+    if not project_id or not name:
+        return web.json_response({"error": "projectId and name required"}, status=400)
+    try:
+        section_id = await tt.create_project_column(project_id, name)
+        sections = await tt.get_sections(project_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("create_project_column failed for %r in %s", name, project_id)
+        return web.json_response({"error": "ticktick_unreachable"}, status=502)
+    if not section_id:
+        return web.json_response({"error": "create_failed"}, status=502)
+    logger.info("Mini App: created section %r -> %s in %s", name, section_id, project_id)
+    return web.json_response({"ok": True, "sectionId": section_id, "sections": sections})
+
+
 async def _bot_username(request: web.Request) -> str:
     """Cached bot username, for the WebApp's "add to group" deep link."""
     cached = request.app.get("bot_username")
@@ -397,7 +446,7 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
-_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag", "extract_model", "extract_effort", "system_prompt", "qwen_base_url", "daily_summary")
+_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode", "control_marker", "control_tag", "extract_model", "extract_effort", "system_prompt", "qwen_base_url", "daily_summary", "default_project_id", "default_section_id")
 
 
 async def api_default_prompt(request: web.Request) -> web.Response:
@@ -453,6 +502,8 @@ def build_app(bot: Any) -> web.Application:
             web.post("/api/data", api_data),
             web.get("/api/data", api_data),
             web.post("/api/sections", api_sections),
+            web.post("/api/project", api_create_project),
+            web.post("/api/section", api_create_section),
             web.post("/api/bind", api_bind),
             web.post("/api/unbind", api_unbind),
             web.get("/api/default-prompt", api_default_prompt),
