@@ -33,6 +33,40 @@ def test_projects_block_format_still_parses():
     ]
 
 
+# The ACTUAL live get_projects shape (2026-07): numbered blocks, extra metadata
+# lines, and the id on its own as "(id: <id>)" — NOT "ID: <id>". The old parser
+# only knew "ID:" so this parsed to [] and the Mini App project picker went blank.
+PROJECTS_LIVE = """Found 3 projects:
+
+Project 1:
+Name: ⭐Personal
+Color: #4CA1FF
+View Mode: kanban
+Kind: TASK
+(id: 699d03848f0853b739baf1ca)
+
+Project 2:
+Name: 🧠Assistant
+View Mode: kanban
+Closed: Yes
+Kind: TASK
+(id: 699d03848f0853b739baf1d6)
+
+Project 3:
+Name: Тест
+View Mode: list
+Kind: TASK
+(id: 69eac1bd6d2ed12a11aaf7c2)"""
+
+
+def test_projects_live_paren_id_blocks():
+    assert _parse_projects(PROJECTS_LIVE) == [
+        {"name": "⭐Personal", "id": "699d03848f0853b739baf1ca"},
+        {"name": "🧠Assistant", "id": "699d03848f0853b739baf1d6"},
+        {"name": "Тест", "id": "69eac1bd6d2ed12a11aaf7c2"},
+    ]
+
+
 def test_json_array_fallback():
     js = '[{"id": "c1", "name": "Done"}, {"columnId": "c2", "title": "Doing"}]'
     assert _parse_pairs(js) == [

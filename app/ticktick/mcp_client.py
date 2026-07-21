@@ -55,6 +55,10 @@ def _first_id(text: str) -> str | None:
 # Tolerant key/name parsing for both projects and columns.
 _NAME_RE = re.compile(r"^(?:Name|Title|Column|Section|Раздел)\s*:\s*(.+)$", re.I)
 _KV_ID_RE = re.compile(r"^ID\s*:\s*(\S+)\s*$", re.I)
+# get_projects blocks end the id on its own line as "(id: <id>)" (parenthesised,
+# lowercase) — NOT "ID: <id>". Match that too, else the whole project list parses
+# to empty (create_task still works, but the Mini App project picker goes blank).
+_PAREN_ID_RE = re.compile(r"\(id:\s*([^)]+?)\)", re.I)
 # list_project_columns format: "- <name>  (id: <id>)".
 _BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
 
@@ -76,15 +80,18 @@ def _parse_pairs(text: str) -> list[dict[str, str]]:
     if pairs:
         return pairs
 
-    # Format B: "Name:" / "ID:" blocks (get_projects).
+    # Format B: "Name: ..." blocks whose id is either "ID: <id>" or a
+    # parenthesised "(id: <id>)" line (get_projects). Other block lines
+    # (Color/View Mode/Kind) are ignored until the id shows up.
     name: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
         m_name = _NAME_RE.match(stripped)
-        m_id = _KV_ID_RE.match(stripped)
         if m_name:
             name = m_name.group(1).strip()
-        elif m_id and name is not None:
+            continue
+        m_id = _KV_ID_RE.match(stripped) or _PAREN_ID_RE.search(stripped)
+        if m_id and name is not None:
             pairs.append({"name": name, "id": m_id.group(1).strip()})
             name = None
     if pairs:
