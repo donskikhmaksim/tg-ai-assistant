@@ -87,6 +87,8 @@ async def process_chat(chat_id: str) -> None:
     extract_rules = settings_doc.get("extract_rules")
     importance = settings_doc.get("importance")
     people = settings_doc.get("people")
+    # «Контроль» attribution toggle: per-chat override, else global, else env default.
+    control_mode = settings_doc.get("control_mode") or s.control_mode
 
     # Tier 1 — cheap local gate (importance injected here too).
     if not await qwen.has_task(
@@ -130,7 +132,7 @@ async def process_chat(chat_id: str) -> None:
         )
 
     smap = await _resolve_section_map(chat_id)
-    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap, tt)
+    await _create_new_tasks(chat_id, result.get("new_tasks", []), messages, smap, tt, control_mode)
     await _apply_status_updates(chat_id, open_tasks, result.get("status_updates", []), smap, tt)
     await _route_rejected(chat_id, result.get("rejected", []), messages, smap, tt)
 
@@ -230,12 +232,30 @@ def _section_for(smap: dict[str, Any], category: str) -> str | None:
     return (entry or {}).get("id")
 
 
+def _control_decision(chat_id: str, who: str | None, control_mode: str) -> str:
+    """Attribution decision for a single extracted DM task. Returns one of
+    "normal" | "control" | "skip".
+
+    Only DMs (chatId `user_…`) are affected — groups keep their current behavior
+    (from/to names already carry attribution). In a DM an action can be on the
+    OWNER (who="me" → a normal to-do) or on the COUNTERPARTY (who="counterparty",
+    delegated or self-volunteered) → a «Контроль» item the owner only TRACKS.
+    `control_mode` toggles those: "off" skips them entirely (owner wants only
+    their own tasks), anything else ("on", default) creates and marks them."""
+    if not chat_id.startswith("user_"):
+        return "normal"
+    if (who or "me") != "counterparty":
+        return "normal"
+    return "skip" if control_mode == "off" else "control"
+
+
 async def _create_new_tasks(
     chat_id: str,
     new_tasks: list[dict[str, Any]],
     messages: list[dict[str, Any]] | None = None,
     smap: dict[str, Any] | None = None,
     tt: TickTickMCP | None = None,
+    control_mode: str = "on",
 ) -> None:
     if not new_tasks:
         return
@@ -258,11 +278,18 @@ async def _create_new_tasks(
         title = (t.get("task") or "").strip()
         if not title:
             continue
+        # DM attribution: skip / mark counterparty-action tasks as «Контроль».
+        decision = _control_decision(chat_id, t.get("who"), control_mode)
+        if decision == "skip":
+            logger.info("Chat %s: control_mode=off, skipping counterparty task: %s", chat_id, title)
+            continue
+        is_control = decision == "control"
         dedup = repo.dedup_hash(chat_id, title)
         task_doc = {
             "chatId": chat_id,
             "task": title,
             "who": t.get("who", "me"),
+            "control": is_control,
             "counterpartyName": t.get("counterpartyName"),
             "deadline": t.get("deadline"),
             "details": t.get("details"),
@@ -288,9 +315,12 @@ async def _create_new_tasks(
             continue
         try:
             when = _source_time(t.get("source_message_ids"), date_by_id, default_tz)
-            note = _task_note(t, source, when=when, link=link, is_group=is_group)
+            note = _task_note(t, source, when=when, link=link, is_group=is_group, is_control=is_control)
+            # «Контроль» items get a visible title marker in TickTick (the stored
+            # `task` stays raw so dedup/matching are unaffected).
+            tt_title = f"👁 Контроль: {title}" if is_control else title
             tt_id = await tt.create_task(
-                title=title,
+                title=tt_title,
                 project_id=project_id,
                 content=note,
                 due_date=to_ticktick_due(t.get("deadline"), t.get("deadline_tz"), default_tz),
@@ -352,6 +382,7 @@ def _task_note(
     when: str | None = None,
     link: str | None = None,
     is_group: bool = False,
+    is_control: bool = False,
 ) -> str:
     # Markdown — TickTick renders it in the task description.
     meta = []
@@ -366,7 +397,11 @@ def _task_note(
     if when:
         meta.append(f"**Когда:** {when}")
     # In a DM, note responsibility only when it's the counterparty (own → no label).
-    if not is_group and t.get("who") == "counterparty":
+    # A «Контроль» item — the owner tracks someone else's commitment — says so.
+    if is_control:
+        name = t.get("counterpartyName")
+        meta.append(f"**👁 Контроль** · ответственный: {name or 'собеседник'}")
+    elif not is_group and t.get("who") == "counterparty":
         name = t.get("counterpartyName")
         meta.append(f"**Ответственный:** {name or 'собеседник'}")
 

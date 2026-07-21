@@ -276,7 +276,7 @@ async def api_unbind(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "removed": removed})
 
 
-_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map")
+_SETTINGS_FIELDS = ("alias", "who", "topics", "task_side", "importance", "people", "filter_rules", "extract_rules", "section_map", "control_mode")
 
 
 async def api_get_settings(request: web.Request) -> web.Response:
