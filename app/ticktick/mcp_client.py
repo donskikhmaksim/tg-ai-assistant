@@ -61,6 +61,9 @@ _KV_ID_RE = re.compile(r"^ID\s*:\s*(\S+)\s*$", re.I)
 _PAREN_ID_RE = re.compile(r"\(id:\s*([^)]+?)\)", re.I)
 # list_project_columns format: "- <name>  (id: <id>)".
 _BULLET_ID_RE = re.compile(r"^[-*]\s*(.+?)\s*\(id:\s*([^)]+?)\)\s*$", re.I)
+# search_tasks format: "- [Project] <title>  (id:<id> proj:<pid>)" (no space
+# after id:, and "proj:" right after) — used to recover a freshly-created id.
+_SEARCH_ID_RE = re.compile(r"\(id:\s*(\S+?)\s+proj:", re.I)
 
 
 def _parse_pairs(text: str) -> list[dict[str, str]]:
@@ -185,14 +188,31 @@ class TickTickMCP:
         summary: str | None = None,
     ) -> str | None:
         """Create a single task via the array-based `create_tasks` tool (the
-        singular `create_task` was merged into it). `create_tasks` doesn't return
-        the new id, so this returns None — callers get the id by searching by
-        title when they need it."""
+        singular `create_task` was merged into it). `create_tasks` does NOT echo
+        the new id, so we recover it by searching for the exact title — otherwise
+        the caller can't link it (breaks status-sync and makes re-pushes create
+        duplicates). Returns the id, or None if it couldn't be found."""
         task = self._task_obj(title, project_id, content, due_date, section_id, is_all_day)
         text = await self.call(
             "create_tasks", {"summary": summary or title, "tasks": [task]}
         )
-        return _first_id(text)
+        return _first_id(text) or await self.find_task_id(title)
+
+    async def find_task_id(self, title: str) -> str | None:
+        """Look up a task id by its exact title via search_tasks. Best-effort:
+        returns None if not found (e.g. the v2 cache hasn't settled yet)."""
+        try:
+            raw = await self.call("search_tasks", {"search_term": title})
+        except Exception:  # noqa: BLE001
+            logger.exception("search_tasks failed for %r", title)
+            return None
+        needle = title.strip().lower()
+        for line in raw.splitlines():
+            if needle and needle in line.lower():
+                m = _SEARCH_ID_RE.search(line)
+                if m:
+                    return m.group(1)
+        return None
 
     async def create_tasks(self, tasks: list[dict[str, Any]], summary: str) -> str:
         """Create MANY tasks in ONE call. Each item is a task dict from

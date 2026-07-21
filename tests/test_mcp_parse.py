@@ -1,4 +1,6 @@
-from app.ticktick.mcp_client import _parse_pairs, _parse_projects
+import asyncio
+
+from app.ticktick.mcp_client import TickTickMCP, _parse_pairs, _parse_projects
 
 # Real list_project_columns output shape: "- <name>  (id: <id>)".
 COLUMNS = """Columns of project 69f841179f1911020b96a62b (2):
@@ -73,3 +75,34 @@ def test_json_array_fallback():
         {"name": "Done", "id": "c1"},
         {"name": "Doing", "id": "c2"},
     ]
+
+
+SEARCH_OUT = (
+    "Tasks matching 'Написать или надиктовать' (1):\n"
+    "- [Inbox] Написать или надиктовать, в чём суть предложения по гаражным "
+    "воротам  (id:6a5ec7948f08352c918086fd proj:inbox122587194)"
+)
+
+
+def test_find_task_id_recovers_id_from_search():
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        assert name == "search_tasks"
+        return SEARCH_OUT
+
+    tt.call = fake_call  # type: ignore[assignment]
+    tid = asyncio.run(
+        tt.find_task_id("Написать или надиктовать, в чём суть предложения по гаражным воротам")
+    )
+    assert tid == "6a5ec7948f08352c918086fd"
+
+
+def test_find_task_id_none_when_no_match():
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        return "Tasks matching 'x' (0):"
+
+    tt.call = fake_call  # type: ignore[assignment]
+    assert asyncio.run(tt.find_task_id("nope")) is None
