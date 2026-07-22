@@ -270,13 +270,17 @@ async def api_data(request: web.Request) -> web.Response:
     primary = await repo.get_bot_state(OWNER_ID_KEY)
     is_primary = primary is not None and uid == int(primary)
 
+    # Degrade instead of failing the whole endpoint: if TickTick is down the
+    # Mini App still shows chats/settings, with a "projects unavailable" banner
+    # (projectsError) instead of a blank page.
     projects: list[Any] = []
+    projects_error = False
     if tt is not None:
         try:
             projects = await tt.get_projects()
         except Exception:  # noqa: BLE001
             logger.exception("get_projects failed")
-            return web.json_response({"error": "ticktick_unreachable"}, status=502)
+            projects_error = True
 
     chats = await repo.list_known_chats(owner_id=str(uid), include_unowned=is_primary)
     bindings = {b["chatId"]: b for b in await repo.list_project_bindings()}
@@ -306,6 +310,7 @@ async def api_data(request: web.Request) -> web.Response:
             "chats": out_chats,
             "botUsername": await _bot_username(request),
             "needsTickTick": tt is None,
+            "projectsError": projects_error,
         }
     )
 

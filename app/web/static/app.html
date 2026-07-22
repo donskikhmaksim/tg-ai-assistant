@@ -163,6 +163,10 @@
 
     .empty { text-align: center; color: var(--hint); margin-top: 40px; }
     .err { text-align: center; color: #e05a5a; margin-top: 40px; }
+    .banner {
+      background: var(--card); color: #e0b34a; font-size: 13px; line-height: 1.45;
+      padding: 10px 12px; border-radius: 10px; margin-bottom: 12px;
+    }
     .section-divider {
       color: var(--hint); font-size: 11px; text-transform: uppercase;
       letter-spacing: .05em; margin: 16px 4px 6px;
@@ -252,6 +256,13 @@
     return d + "д назад";
   }
 
+  // Known backend error codes → human-readable Russian.
+  const API_ERRORS = {
+    ticktick_unreachable: "TickTick недоступен — попробуй ещё раз позже",
+    ticktick_not_connected: "TickTick не подключён — подключи его в чате с ботом",
+    create_failed: "TickTick не создал объект — попробуй ещё раз",
+  };
+
   async function api(path, body) {
     const isGet = body === undefined;
     const res = await fetch(path, {
@@ -259,7 +270,12 @@
       headers: {"Content-Type":"application/json","X-Telegram-Init-Data":INIT},
       ...(isGet ? {} : {body: JSON.stringify(body)}),
     });
-    if (!res.ok) throw new Error((await res.text()) || res.status);
+    if (!res.ok) {
+      let msg = "";
+      try { msg = await res.text(); } catch {}
+      try { const j = JSON.parse(msg); if (j && j.error) msg = j.error; } catch {}
+      throw new Error(API_ERRORS[msg] || msg || ("HTTP " + res.status));
+    }
     return res.json();
   }
 
@@ -328,12 +344,17 @@
     );
 
     const $c = document.getElementById("content");
+    let banner = "";
+    if (data.projectsError)
+      banner = `<div class="banner">⚠️ Не удалось загрузить проекты из TickTick — списки проектов пустые. Закрой и открой приложение чуть позже.</div>`;
+    else if (data.needsTickTick)
+      banner = `<div class="banner">⚠️ TickTick не подключён — привязка проектов пока недоступна. Подключи его в чате с ботом.</div>`;
     if (!allChats.length) {
-      $c.innerHTML = `<div class="empty">Бот ещё не видел ни одного чата.<br>Напиши ему в личку или добавь в группу.</div>`;
+      $c.innerHTML = banner + `<div class="empty">Бот ещё не видел ни одного чата.<br>Напиши ему в личку или добавь в группу.</div>`;
       return;
     }
 
-    $c.innerHTML = "";
+    $c.innerHTML = banner;
     $c.appendChild(buildGlobalCard());
 
     const groups = allChats.filter(c => c.kind === "group");
@@ -422,7 +443,7 @@
       try {
         const r = await api("/api/sections", {projectId: pid});
         selS.innerHTML = sectionOptionsHtml(r.sections || [], selectedId, "— без раздела —");
-      } catch { sectWrap.style.display = "none"; }
+      } catch { sectWrap.style.display = "none"; toast("Не удалось загрузить разделы"); }
     }
 
     if (curProject) loadSections(curProject, curSection);
@@ -562,7 +583,7 @@
         const r = await api("/api/sections", {projectId: pid});
         const secs = r.sections || [];
         selS.innerHTML = sectionOptionsHtml(secs, selectedId, "— без раздела —");
-      } catch { sectWrap.style.display = "none"; }
+      } catch { sectWrap.style.display = "none"; toast("Не удалось загрузить разделы"); }
     }
 
     async function bindProject(pid) {
@@ -633,14 +654,15 @@
     });
   }
 
-  // After creating a project inline, refresh the option list of every open
-  // project <select> so the new project shows up everywhere (each keeps its
-  // own current selection).
+  // After creating a project inline, refresh the option list of every project
+  // <select> on the page — binding, global default AND route rows — so the new
+  // project shows up everywhere (each keeps its own current selection).
   function refreshAllProjectSelects() {
-    document.querySelectorAll("select.proj-sel, select.def-proj-sel").forEach(sel => {
+    document.querySelectorAll("select.proj-sel, select.def-proj-sel, select.route-proj").forEach(sel => {
       const cur = sel.value;
-      const placeholder = sel.classList.contains("def-proj-sel")
-        ? "— как в деплое —" : "— не привязано —";
+      const placeholder = sel.classList.contains("def-proj-sel") ? "— как в деплое —"
+        : sel.classList.contains("route-proj") ? "— проект —"
+        : "— не привязано —";
       sel.innerHTML = projectOptionsHtml(cur === "__new__" ? "" : cur, placeholder);
       sel.value = cur === "__new__" ? "" : cur;
     });
@@ -698,7 +720,7 @@
         const r = await api("/api/sections", { projectId: pid });
         sel.innerHTML = sectionOptionsHtml(r.sections || [], selectedId, "— без раздела —");
         if (selectedId) sel.value = selectedId;
-      } catch { wrap.style.display = "none"; }
+      } catch { wrap.style.display = "none"; toast("Не удалось загрузить разделы"); }
     }
 
     function addRow(route) {
@@ -726,7 +748,6 @@
             const r = await api("/api/project", { name });
             allProjects = r.projects || allProjects;
             refreshAllProjectSelects();
-            refreshRouteProjectSelects();
             selP.value = r.projectId;
           } catch (e) { saved.textContent = "Ошибка: " + e.message; selP.value = route.project_id || ""; return; }
         }
@@ -757,15 +778,6 @@
 
     (routes || []).forEach(addRow);
     body.querySelector(".route-add").addEventListener("click", () => addRow({}));
-  }
-
-  // Refresh route-row project selects after an inline project create.
-  function refreshRouteProjectSelects() {
-    document.querySelectorAll("select.route-proj").forEach(sel => {
-      const cur = sel.value;
-      sel.innerHTML = projectOptionsHtml(cur === "__new__" ? "" : cur, "— проект —");
-      sel.value = cur === "__new__" ? "" : cur;
-    });
   }
 
   // ── Section routing block (optional per-category → column) ─────────────────
@@ -1239,7 +1251,9 @@
       render(data);
     } catch (e) {
       document.getElementById("content").innerHTML =
-        `<div class="err">Не удалось загрузить.<br>${esc(e.message)}</div>`;
+        `<div class="err">Не удалось загрузить: ${esc(e.message)}<br>
+          <button class="bulk-btn" style="width:auto;padding:10px 20px" onclick="location.reload()">↻ Обновить</button>
+        </div>`;
     }
   })();
 </script>
