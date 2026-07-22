@@ -517,8 +517,26 @@ async def api_cre_notify(request: web.Request) -> web.Response:
     text = (body.get("text") or "").strip()
     if not text:
         return web.json_response({"ok": False, "error": "empty text"}, status=400)
-    await request.app["bot"].send_message(int(chat_id), text[:4000])
-    return web.json_response({"ok": True})
+    bot = request.app["bot"]
+    # Целевой чат может оказаться недоступным (бот не может писать первым:
+    # "chat not found", если с этим id нет открытой переписки). Тогда фолбек —
+    # owner_id из bot_state: туда watchdog уже успешно доставляет DM-ы.
+    targets = [chat_id]
+    try:
+        owner = await repo.get_bot_state("owner_id")
+        if owner and str(owner) != str(chat_id):
+            targets.append(str(owner))
+    except Exception:  # noqa: BLE001
+        pass
+    last_err = ""
+    for target in targets:
+        try:
+            await bot.send_message(int(target), text[:4000])
+            return web.json_response({"ok": True, "sent_to": target})
+        except Exception as e:  # noqa: BLE001
+            last_err = f"{target}: {type(e).__name__}: {str(e)[:120]}"
+            logger.warning("cre/notify: не доставлено в %s", last_err)
+    return web.json_response({"ok": False, "error": last_err}, status=502)
 
 
 def build_app(bot: Any) -> web.Application:
