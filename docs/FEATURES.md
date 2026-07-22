@@ -457,7 +457,7 @@ Mini App и система per-chat настроек бота. Основано 
 
 **Что делает.** «Выпустить один раз — обновятся все». Каждый self-hoster держит **форк** публичного репо и подключает к Railway **именно форк** (не upstream) — Railway пересобирает только по push в подключённый репозиторий, поэтому подключение форка критично.
 
-**Установщик (`scripts/setup.sh`).** Автоматизирует настройку: через `gh` форкает upstream (`gh repo fork donskikhmaksim/tg-ai-assistant --clone=false`, идемпотентно), включает Actions на форке (`gh api -X PUT /repos/$USER/tg-ai-assistant/actions/permissions -f enabled=true`) и подключает форк как источник Railway (`railway service source connect --repo "$USER/tg-ai-assistant" --branch main`). Если `gh` не установлен/не залогинен — печатает веб-фолбэк (ссылка `…/fork` + включение Actions вручную) и спрашивает GitHub-логин. Прежний баг: установщик подключал upstream напрямую → кросс-аккаунтный deploy-on-push не срабатывал → инстансы «замерзали».
+**Установщик (`scripts/setup.sh`).** Автоматизирует настройку: через `gh` форкает upstream (`gh repo fork donskikhmaksim/tg-ai-assistant --clone=false`, идемпотентно), включает Actions на форке (`gh api -X PUT /repos/$USER/tg-ai-assistant/actions/permissions -F enabled=true`) и подключает форк как источник Railway (`railway service source connect --repo "$USER/tg-ai-assistant" --branch main`). Если `gh` не установлен/не залогинен — печатает веб-фолбэк (ссылка `…/fork` + включение Actions вручную) и спрашивает GitHub-логин. Прежний баг: установщик подключал upstream напрямую → кросс-аккаунтный deploy-on-push не срабатывал → инстансы «замерзали».
 
 **Workflow (`.github/workflows/sync-upstream.yml`).**
 - Cron `*/5 * * * *` (+ ручной `workflow_dispatch`).

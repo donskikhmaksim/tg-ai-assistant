@@ -43,10 +43,19 @@ BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; RED="\033[0;31m"; CYAN=
 step() { echo -e "\n${BOLD}${CYAN}▶ $1${RESET}"; }
 ok()   { echo -e "${GREEN}✓ $1${RESET}"; }
 ask()  { echo -e "${YELLOW}➜ $1${RESET}"; }
+# Маскирует секреты (токены, ключи, длинные hex/base64-блоки) перед выводом,
+# чтобы значения не утекли в терминал/скриншот при показе хвоста лога.
+mask_secrets() {
+  sed -E \
+    -e 's/(BOT_TOKEN|ANTHROPIC_API_KEY|MONGO_URL|TICKTICK_MCP_URL|TICKTICK_ACCESS_TOKEN|TICKTICK_REFRESH_TOKEN|MCP_SECRET|GH_TOKEN|GITHUB_TOKEN)([=:] *)[^[:space:]]+/\1\2***/g' \
+    -e 's/sk-ant-[A-Za-z0-9_-]+/***/g' \
+    -e 's/[0-9]{6,}:[A-Za-z0-9_-]{30,}/***/g' \
+    -e 's/[A-Fa-f0-9]{32,}/***/g'
+}
 fail() {
   echo -e "${RED}✗ $1${RESET}" >&2
   if [[ -n "$2" && -f "$2" ]]; then
-    echo "--- подробности ---" >&2; tail -20 "$2" >&2; echo "" >&2
+    echo "--- подробности ---" >&2; tail -20 "$2" | mask_secrets >&2; echo "" >&2
     echo -e "${YELLOW}Полный лог сохранён в: $2${RESET}" >&2
     echo "Если пишешь тому, кто прислал скрипт — пришли этот файл целиком." >&2
   fi
@@ -139,7 +148,7 @@ fi
 redeploy_with_retry() {
   local attempt=0 max_attempts=24
   while true; do
-    if railway redeploy --service "$SERVICE" --yes --json >>"$LOG" 2>&1; then return 0; fi
+    if railway redeploy --service "$SERVICE" --from-source --yes --json >>"$LOG" 2>&1; then return 0; fi
     attempt=$((attempt + 1))
     [[ $attempt -ge $max_attempts ]] && fail "Не получилось запустить сборку после $max_attempts попыток." "$LOG"
     sleep 10
@@ -186,7 +195,7 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null; then
     if gh repo view "$GH_USER/tg-ai-assistant" &>/dev/null; then
       echo "Включаю GitHub Actions на форке (для автосинка каждые ~5 мин)..."
       gh api -X PUT "/repos/$GH_USER/tg-ai-assistant/actions/permissions" \
-        -f enabled=true >>"$LOG" 2>&1 || true
+        -F enabled=true >>"$LOG" 2>&1 || true
       CONNECT_REPO="$GH_USER/tg-ai-assistant"
     else
       echo -e "${YELLOW}  Форк не появился — подключу апстрим напрямую (обновления вручную).${RESET}"
