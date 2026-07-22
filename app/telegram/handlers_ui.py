@@ -45,9 +45,10 @@ from .. import repositories as repo
 from ..config import get_settings
 from ..onboarding.invites import create_invite, has_access, redeem_invite
 from ..onboarding.notes import create_note
-from ..onboarding.ticktick_resolve import get_user_ticktick, set_user_mcp_url
-from ..tenancy import is_multi_tenant_allowed
+from ..ticktick.mcp_client import resolve_ticktick
 from .notify import group_watch_announcement
+
+TICKTICK_URL_KEY = "ticktick_mcp_url"
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def _main_menu() -> ReplyKeyboardMarkup:
 # ---------------------------------------------------------------------------
 
 async def _is_owner(user_id: int | None) -> bool:
-    """True if the actor is the primary owner. Until the owner is known (Business
+    """True if the actor is the one owner. Until the owner is known (Business
     not yet connected) we don't block, so first-time setup isn't locked out."""
     owner = await repo.get_bot_state("owner_id")
     if owner is None:
@@ -105,42 +106,13 @@ async def _is_owner(user_id: int | None) -> bool:
     return user_id is not None and int(owner) == int(user_id)
 
 
-async def _is_tenant(user_id: int | None) -> bool:
-    """True if the actor is a tenant of this bot: the primary owner, or a user
-    who has connected their own Business account. Before any owner is known we
-    don't block (bootstrap). Non-tenants get the onboarding invite instead of
-    the management menu.
-
-    Single-tenant lock: while multi-tenant is OFF (the default) only the primary
-    owner (handled by `_is_owner`, which also allows fresh-deploy bootstrap) is a
-    tenant — a second user's Business connection does NOT make them one."""
-    if await _is_owner(user_id):
-        return True
-    if user_id is None:
-        return False
-    if not is_multi_tenant_allowed():
-        return False
-    return await repo.get_owner_connection_count(str(user_id)) > 0
-
-
-async def _is_chat_owner(user_id: int | None, chat_key: str) -> bool:
-    """True if the actor owns THIS chat (its tasks route to their TickTick).
-    Groups (and legacy chats) fall back to the primary owner."""
-    if user_id is None:
-        return False
-    owner = await repo.resolve_chat_owner(chat_key)
-    if owner is None:
-        return True  # no owner known yet — allow bootstrap
-    return str(owner) == str(user_id)
-
-
 # ---------------------------------------------------------------------------
 # TickTick lookups (best-effort — never raise into a handler).
 # ---------------------------------------------------------------------------
 
-async def _tt(user_id: int | None):
-    """The actor's own TickTick client (multi-tenant), or None if not connected."""
-    return await get_user_ticktick(str(user_id)) if user_id is not None else None
+async def _tt(_user_id: int | None = None):
+    """The single global TickTick client, or None if not configured."""
+    return await resolve_ticktick()
 
 
 async def _safe_projects(user_id: int | None) -> list[dict[str, str]]:
@@ -285,7 +257,7 @@ async def on_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
 async def start_bind(message: Message) -> None:
     actor = message.from_user.id if message.from_user else None
     if message.chat.type in ("group", "supergroup"):
-        if not await _is_chat_owner(actor, f"group_{message.chat.id}"):
+        if not await _is_owner(actor):
             return  # only the group's owner may bind it
     await _send_project_picker(message.bot, message.chat.id, actor)
 
@@ -298,7 +270,7 @@ async def on_pick_project(callback: CallbackQuery) -> None:
     if chat_key is None:
         await callback.answer("Не понял чат.", show_alert=True)
         return
-    if not await _is_chat_owner(callback.from_user.id, chat_key):
+    if not await _is_owner(callback.from_user.id):
         await callback.answer("Выбирать проект может только владелец чата.", show_alert=True)
         return
 
@@ -331,7 +303,7 @@ async def on_pick_section(callback: CallbackQuery) -> None:
     if chat_key is None:
         await callback.answer("Не понял чат.", show_alert=True)
         return
-    if not await _is_chat_owner(callback.from_user.id, chat_key):
+    if not await _is_owner(callback.from_user.id):
         await callback.answer("Выбирать раздел может только владелец чата.", show_alert=True)
         return
 
@@ -357,32 +329,32 @@ async def on_pick_section(callback: CallbackQuery) -> None:
 
 @router.message(Command("connect"))
 async def cmd_connect(message: Message) -> None:
-    """Register the CALLER's own ticktick-mcp connector URL (multi-tenant).
+    """Set this instance's single ticktick-mcp connector URL (owner-only).
 
-    The URL is itself the credential, so we best-effort delete the command
-    message after storing it, and verify the connector actually answers.
+    The URL is itself the credential (secret in the path), so we best-effort
+    delete the command message after storing it, and verify the connector
+    actually answers. Stored as a runtime override in bot_state — it takes
+    priority over the TICKTICK_MCP_URL env for the whole instance.
     """
     uid = message.from_user.id if message.from_user else None
     if uid is None:
         return
-    if not await _is_tenant(uid):
-        # Single-tenant lock: this is a private instance — don't let a stranger
-        # register their own connector and be served here.
+    if not await _is_owner(uid):
+        # Single-tenant: this is a private instance — only the owner configures it.
         await message.answer("Этот бот приватный: подключение доступно только владельцу.")
         return
     parts = (message.text or "").split(maxsplit=1)
     url = parts[1].strip() if len(parts) > 1 else ""
     if not url or "/mcp/" not in url:
         await message.answer(
-            "Пришли свой личный адрес ticktick-mcp так:\n"
+            "Пришли адрес своего ticktick-mcp так:\n"
             "`/connect https://<твой>.up.railway.app/mcp/<секрет>`\n\n"
-            "Это твой персональный коннектор — задачи полетят в ТВОЙ TickTick, "
-            "ни в чей другой.",
+            "Это коннектор ЭТОГО бота — задачи полетят в привязанный TickTick.",
             parse_mode="Markdown",
         )
         return
 
-    await set_user_mcp_url(str(uid), url)
+    await repo.set_bot_state(TICKTICK_URL_KEY, url)
     # The URL is a secret — don't leave it sitting in the chat.
     try:
         await message.delete()
@@ -391,15 +363,15 @@ async def cmd_connect(message: Message) -> None:
 
     ok = False
     try:
-        tt = await get_user_ticktick(str(uid))
+        tt = await resolve_ticktick()
         if tt is not None:
             await tt.get_projects()
             ok = True
     except Exception:  # noqa: BLE001
-        logger.exception("connect verify failed for user %s", uid)
+        logger.exception("connect verify failed")
 
     if ok:
-        await message.answer("✅ Твой TickTick подключён. Теперь можно /bind.")
+        await message.answer("✅ TickTick подключён. Теперь можно /bind.")
     else:
         await message.answer(
             "⚠️ Сохранил адрес, но проверка не прошла — коннектор недоступен или "
@@ -756,28 +728,6 @@ async def cmd_start(
         )
         return
 
-    if await _is_tenant(uid):
-        # A tenant: primary owner, or someone who connected their own Business
-        # account. Both manage only their own chats. Nudge /connect if they
-        # haven't linked their own TickTick yet.
-        has_tt = uid is not None and await get_user_ticktick(str(uid)) is not None
-        tail = (
-            "Через меню ниже можно привязать этот чат к проекту."
-            if has_tt else
-            "Сначала подключи свой TickTick: пришли `/connect <адрес твоего "
-            "ticktick-mcp>`. После этого задачи полетят в ТВОЙ аккаунт, ни в чей "
-            "другой."
-        )
-        await message.answer(
-            "👁 Большой Брат на связи.\n\n"
-            "Я извлекаю задачи и договорённости из переписки — лички и групп — и "
-            "завожу их в TickTick. Уведомлений не шлю: задачи просто появляются. "
-            "Я всё вижу.\n\n" + tail,
-            reply_markup=_main_menu(),
-            parse_mode="Markdown",
-        )
-        return
-
     # Never connected Business: offer to deploy their OWN fully-isolated instance
     # (alternatively they can add this bot to their Business account, then
     # /connect their TickTick — but self-hosting keeps their data fully private).
@@ -835,7 +785,7 @@ async def unbind(message: Message) -> None:
     chat_id = _chat_id_for(message)
     if message.chat.type in ("group", "supergroup"):
         actor = message.from_user.id if message.from_user else None
-        if not await _is_chat_owner(actor, chat_id):
+        if not await _is_owner(actor):
             return
     if await repo.delete_project_binding(chat_id):
         await message.answer(f"Привязка для `{chat_id}` снята.")
@@ -887,17 +837,10 @@ _CS_FIELDS: dict[str, tuple[str, str, str]] = {
 }
 
 
-async def _owner_query(actor_id: int | None) -> dict:
-    """Mongo filter on chat_state restricting to the actor's own chats (tenant
-    isolation). The primary owner also sees legacy/unowned chats so nothing
-    disappears during the multi-tenant transition."""
-    if actor_id is None:
-        return {}
-    primary = await repo.get_bot_state("owner_id")
-    if primary is not None and int(primary) == int(actor_id):
-        return {"$or": [{"ownerId": str(actor_id)}, {"ownerId": {"$in": [None]}},
-                        {"ownerId": {"$exists": False}}]}
-    return {"ownerId": str(actor_id)}
+async def _owner_query(_actor_id: int | None) -> dict:
+    """Mongo filter on chat_state. Single-tenant: all chats belong to the one
+    owner, so there is nothing to filter — every chat is in scope."""
+    return {}
 
 
 async def _cs_chats_keyboard(actor_id: int | None) -> InlineKeyboardMarkup:
@@ -949,7 +892,7 @@ def _cs_card_keyboard(chat_id: str, settings_doc: dict) -> InlineKeyboardMarkup:
 @router.message(F.text == BTN_SETTINGS)
 async def cmd_settings(message: Message) -> None:
     actor = message.from_user.id if message.from_user else None
-    if not await _is_tenant(actor):
+    if not await _is_owner(actor):
         return
     kb = await _cs_chats_keyboard(actor)
     await message.answer("Выбери чат для настройки:", reply_markup=kb)
@@ -1073,7 +1016,7 @@ async def cs_reset_field(callback: CallbackQuery) -> None:
 
 @router.message(F.text == BTN_GLOBAL)
 async def cmd_global_settings(message: Message) -> None:
-    if not await _is_tenant(message.from_user.id if message.from_user else None):
+    if not await _is_owner(message.from_user.id if message.from_user else None):
         return
     settings_doc = await repo.get_global_settings()
     text = _cs_card_text("__global__", "", settings_doc)

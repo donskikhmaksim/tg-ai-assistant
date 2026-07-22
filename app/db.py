@@ -6,7 +6,7 @@ Collections (see spec §5):
   chat_project_map — chat -> TickTick project binding
   chat_state     — per-chat processing cursor
   chat_summary   — long-term per-chat memory (permanent)
-  bot_state      — business_connection / owner info, dialog state
+  bot_state      — owner id, business connection id, TickTick URL override
 """
 from __future__ import annotations
 
@@ -65,16 +65,8 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase, raw_ttl_seconds: int) -> Non
     )
     await db.chat_project_map.create_index([("chatId", ASCENDING)], unique=True)
     await db.chat_state.create_index([("chatId", ASCENDING)], unique=True)
-    await db.chat_state.create_index([("ownerId", ASCENDING)])  # tenant chat lists
     await db.chat_summary.create_index([("chatId", ASCENDING)], unique=True)
     await db.bot_state.create_index([("key", ASCENDING)], unique=True)
-    # Multi-tenant: connection->owner registry + per-user encrypted vault.
-    await db.business_connections.create_index([("connectionId", ASCENDING)], unique=True)
-    await db.business_connections.create_index([("ownerId", ASCENDING)])
-    await db.user_credentials.create_index(
-        [("userId", ASCENDING), ("provider", ASCENDING), ("label", ASCENDING)],
-        unique=True, name="user_provider_label",
-    )
     # Permanent embedding archive for retrieval (NO TTL — survives raw expiry).
     await db.message_vectors.create_index(
         [("chatId", ASCENDING), ("messageId", ASCENDING)], unique=True

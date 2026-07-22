@@ -1,6 +1,6 @@
 # tg-ai-assistant — подробное описание всех фич
 
-`tg-ai-assistant` (кодовое имя «Большой Брат») — само-хостируемый Telegram-бот, который через Telegram Business слушает личные и групповые переписки владельца, извлекает из них задачи с помощью двухуровневого LLM-конвейера (локальный Qwen для дешёвого триажа + Claude для извлечения) и создаёт эти задачи в TickTick конкретного человека. Проект развился из single-owner инструмента в мульти-тенантную платформу: один запущенный экземпляр обслуживает нескольких независимых пользователей, у каждого — свои переписки, свои учётные данные и свой TickTick, и никто не видит чужого. Управление ведётся через Mini App (single-page WebApp с per-chat настройками) и дублирующий native-UI внутри Telegram. Репозиторий публичный и рассчитан на изолированный self-host: каждый деплоер поднимает полностью автономную приватную копию.
+`tg-ai-assistant` (кодовое имя «Большой Брат») — само-хостируемый Telegram-бот, который через Telegram Business слушает личные и групповые переписки владельца, извлекает из них задачи с помощью двухуровневого LLM-конвейера (локальный Qwen для дешёвого триажа + Claude для извлечения) и создаёт эти задачи в TickTick владельца. Модель — строго **single-tenant self-host**: один запущенный экземпляр обслуживает ровно ОДНОГО владельца; каждый деплоер поднимает полностью автономную приватную копию (свой бот, своя база, свой TickTick). Управление ведётся через Mini App (single-page WebApp с per-chat настройками) и дублирующий native-UI внутри Telegram. Репозиторий публичный и рассчитан на изолированный self-host: каждый деплоер поднимает полностью автономную приватную копию.
 
 ## Оглавление
 
@@ -27,14 +27,11 @@
    - 3.1 Tier-2 через CLI shim
    - 3.2 Когда shim, а когда Anthropic API
    - 3.3 Daily extraction watchdog
-4. [Мульти-тенант (multihub)](#4-мульти-тенант-multihub)
-   - 4.1 Модель tenancy, owner = user #1
-   - 4.2 Per-user encrypted vault
-   - 4.3 Per-user TickTick (инвариант «никогда в owner'а»)
-   - 4.4 Per-tenant routing + UI-изоляция
-   - 4.5 `/connect` self-service + gates
-   - 4.6 Fork auto-update distribution
-   - 4.7 Индексы и незавершённое
+4. [Single-tenant + distribution](#4-single-tenant--distribution)
+   - 4.1 Owner = user #1
+   - 4.2 Единый TickTick (`resolve_ticktick`) + `/connect`
+   - 4.3 Fork auto-update distribution (native fork)
+   - 4.4 Индексы и замечания
 5. [Онбординг коннекторов](#5-онбординг-коннекторов)
    - 5.1 Role-based `/start`
    - 5.2 Invite-gated setup
@@ -63,15 +60,15 @@
 
 **Источники (три хендлера aiogram):**
 
-- **`@router.business_connection()`** (`on_business_connection`) — не сообщение, а событие подключения бота к Premium-аккаунту владельца через Telegram Business. Здесь регистрируется многотенантный маппинг `connectionId → ownerId` (`repo.set_business_connection`). Первый подключившийся владелец дополнительно пишется в `bot_state` под ключами `owner_id` и `business_connection_id` — это legacy-«первичный» владелец для групп (у которых нет business-connection), бутстрапа Mini App и старых читателей. Повторное подключение второго тенанта не перехватывает «первичного» владельца (запись `owner_id` ставится только если её ещё нет). Здесь же — разовая миграция legacy-URL TickTick владельца в его персональный vault (`seed_owner_from_env`).
+- **`@router.business_connection()`** (`on_business_connection`) — не сообщение, а событие подключения бота к Premium-аккаунту владельца через Telegram Business. Первый подключившийся становится **единственным** владельцем: в `bot_state` пишутся `owner_id` (ровно один раз, `if get_bot_state(OWNER_ID_KEY) is None`) и `business_connection_id`. Повторное подключение обновляет `business_connection_id`, но не меняет владельца.
 
-- **`@router.business_message()` + `@router.edited_business_message()`** (`on_business_message`) — приватные диалоги 1-на-1 через Telegram Business, **включая собственные исходящие сообщения владельца**. Направление вычисляется так: `direction = "out"`, если `from_user.id == owner_id` (владелец сам написал), иначе `"in"`. Владелец связки определяется по `business_connection_id` сообщения через `_conn_owner()` (мультитенантно, с фолбэком на первичного владельца). `chat_id` формируется как `user_<chat.id>` — и в обе стороны `chat.id` указывает на собеседника, поэтому исходящие и входящие сообщения одного диалога сходятся в один `chat_id`. `type = "dm"`.
+- **`@router.business_message()` + `@router.edited_business_message()`** (`on_business_message`) — приватные диалоги 1-на-1 через Telegram Business, **включая собственные исходящие сообщения владельца**. Направление вычисляется так: `direction = "out"`, если `from_user.id == owner_id` (владелец сам написал), иначе `"in"`. Владелец — единственный (`bot_state.owner_id`, через `_owner_id()`). `chat_id` формируется как `user_<chat.id>` — и в обе стороны `chat.id` указывает на собеседника, поэтому исходящие и входящие сообщения одного диалога сходятся в один `chat_id`. `type = "dm"`.
 
 - **`@router.message()`** (`on_group_message`) — сообщения в группах/супергруппах (бот добавлен участником с выключенным privacy mode). Фильтр `chat.type in ("group","supergroup")` отсекает приватные чаты с самим ботом (их обслуживает UI-роутер). У групп нет business-connection, поэтому они принадлежат первичному владельцу (`_owner_id()`). `chat_id = group_<chat.id>`, `type = "group"`. Направление тоже размечается (`out`, если автор — владелец).
 
 **Резолв текста (`_resolve_text`).** Берётся `message.text` или `message.caption`. Если текста нет, но есть голос/аудио/видеокружок (`voice / video_note / audio`) и настроен `transcribe_url` — медиа скачивается и прогоняется через Whisper-сервис на Mac mini (`transcribe_audio`). Fail-soft: при выключенной транскрипции или ошибке возвращается `None`, и сообщение просто не захватывается (стикеры и media-only без подписи игнорируются).
 
-**Атомарность и запись (`repo.save_raw_message`).** Документ апсёртится по ключу `(chatId, messageId)` — повторно доставленные апдейты и ручные переигровки не создают дублей. Сохраняются: `chatId, type, direction, fromId, senderName, text, messageId, businessConnectionId, date`. Сразу после вставки вызывается `touch_chat_state` — обновляет `lastMessageAt` (через `$max`), проставляет `firstSeenAt` при первом появлении, `title` (имя группы или собеседника) и `ownerId` (тенант чата). Именно `ownerId` на `chat_state` потом маршрутизирует задачи в TickTick нужного человека (см. 4.4).
+**Атомарность и запись (`repo.save_raw_message`).** Документ апсёртится по ключу `(chatId, messageId)` — повторно доставленные апдейты и ручные переигровки не создают дублей. Сохраняются: `chatId, type, direction, fromId, senderName, text, messageId, businessConnectionId, date`. Сразу после вставки вызывается `touch_chat_state` — обновляет `lastMessageAt` (через `$max`), проставляет `firstSeenAt` при первом появлении и `title` (имя группы или собеседника). Все чаты принадлежат единственному владельцу — `ownerId` на `chat_state` больше не пишется (см. [4](#4-single-tenant--distribution)).
 
 **TTL.** На `raw_messages.date` висит TTL-индекс `raw_ttl` (`app/db.py`), срок — `raw_ttl_days` (по умолчанию 30 дней) × 86400 сек. Индекс идемпотентно пересоздаётся, если срок изменился. То есть сырые сообщения — эфемерны; долговременный контекст живёт отдельно (summary + эмбеддинги, оба без TTL). Есть и составной индекс `(chatId, date)` для быстрой выборки окна.
 
@@ -183,7 +180,7 @@
 
 **Что делает.** Пушит созданные задачи в TickTick через MCP-клиент, в правильный проект и колонку конкретного владельца. Файл: `app/pipeline/batch.py` (`_resolve_project`, `_resolve_default_section`, `_resolve_section_map`, `_create_new_tasks`, `_apply_status_updates`, `_route_rejected`), клиент — `app/ticktick/mcp_client.py`.
 
-**Мультитенантный роутинг.** `resolve_chat_owner(chat_id)` определяет владельца задач чата (сначала `ownerId` на `chat_state`, иначе legacy `bot_state.owner_id`). `get_user_ticktick(owner)` даёт **персональный** TickTick-клиент этого владельца. Общего аккаунта нет: если у владельца чата нет коннектора (`tt is None`), задачи остаются локальными (в Mongo), могут быть синхронизированы позже. Подробнее модель тенантов — в [4.4](#44-per-tenant-routing--ui-изоляция).
+**TickTick-роутинг.** `resolve_ticktick()` даёт **единственный** TickTick-клиент инстанса (URL из `bot_state["ticktick_mcp_url"]` от `/connect`, иначе env `TICKTICK_MCP_URL`). Если URL не задан (`tt is None`), задачи остаются локальными (в Mongo), могут быть синхронизированы позже. Подробнее — в [4.2](#42-единый-ticktick-resolve_ticktick--connect).
 
 **Резолв проекта (`_resolve_project`).** Возвращает `(projectId, projectName, sectionId)`:
 1. **Явная привязка чата** (`chat_project_map`) выигрывает и может пинить секцию/колонку.
@@ -225,7 +222,7 @@
 
 Mini App и система per-chat настроек бота. Основано на четырёх файлах: `app/web/static/app.html` (фронтенд Mini App), `app/web/server.py` (aiohttp-бэкенд и API), `app/repositories.py` (слой доступа к MongoDB), `app/telegram/handlers_ui.py` (дублирующий native-UI внутри Telegram на inline-кнопках).
 
-Архитектура: aiohttp-сервер (`app/web/server.py`) поднимается рядом с polling бота (`start_web`, порт из `$PORT` Railway). Он отдаёт single-page WebApp по `/app` и небольшой JSON API. Каждый API-вызов аутентифицируется подписью Telegram WebApp `initData` (HMAC-SHA256 на bot token, `_require_owner` → `validate_init_data`) и ограничен арендаторами-tenant'ами (`_is_known_tenant`: primary owner из `bot_state.owner_id`, либо владелец хотя бы одной Business connection, либо любой валидно подписанный пользователь на «свежем» боте для bootstrap). WebApp отдаётся с того же origin, что и API — запросы same-origin, CORS не нужен.
+Архитектура: aiohttp-сервер (`app/web/server.py`) поднимается рядом с polling бота (`start_web`, порт из `$PORT` Railway). Он отдаёт single-page WebApp по `/app` и небольшой JSON API. Каждый API-вызов аутентифицируется подписью Telegram WebApp `initData` (HMAC-SHA256 на bot token, `_require_owner` → `validate_init_data`) и ограничен **единственным владельцем** (`_is_owner`: `bot_state.owner_id`, либо любой валидно подписанный пользователь на «свежем» боте для bootstrap). WebApp отдаётся с того же origin, что и API — запросы same-origin, CORS не нужен.
 
 ## 2.1 Single-page Mini App (accordion-карточки)
 
@@ -270,7 +267,7 @@ Mini App и система per-chat настроек бота. Основано 
 
 **Бэкенд `api_bind`.** Резолвит имя проекта и (best-effort) имя раздела из TickTick, чтобы binding оставался читаемым без обращения к TickTick, и сохраняет через `repo.set_project_binding(chat_id, project_id, name, section_id, section_name)` в коллекцию `chat_project_map` (section хранится даже как `None`, чтобы пере-привязка без раздела очищала старый). **Побочный эффект:** если чат — группа (`group_`), бот шлёт в неё сообщение-«отбивку» `group_watch_announcement(name, section_name)` — публично объявляет, в какой проект теперь «стекается слежка».
 
-**Тот же флоу в Telegram (native).** `handlers_ui.py`: при добавлении в группу (`on_added_to_group`) или по `/bind`/кнопке «🔗 Привязать проект» бот постит inline-picker проектов (`_projects_keyboard`, callback `pp:<projectId>`), затем picker разделов (`_sections_keyboard`, callback `ps:<projectId>:<sectionId|none>`). Callbacks stateless (всё в callback_data) — переживают redeploy. В группе кнопки видит любой, но нажать может только владелец чата (`_is_chat_owner` через `resolve_chat_owner`).
+**Тот же флоу в Telegram (native).** `handlers_ui.py`: при добавлении в группу (`on_added_to_group`) или по `/bind`/кнопке «🔗 Привязать проект» бот постит inline-picker проектов (`_projects_keyboard`, callback `pp:<projectId>`), затем picker разделов (`_sections_keyboard`, callback `ps:<projectId>:<sectionId|none>`). Callbacks stateless (всё в callback_data) — переживают redeploy. В группе кнопки видит любой, но нажать может только владелец (`_is_owner`).
 
 ## 2.5 Семь полей настроек промптов (per-chat context + LLM rule overrides)
 
@@ -334,7 +331,7 @@ Mini App и система per-chat настроек бота. Основано 
 
 ## 2.9 API endpoints (`app/web/server.py`)
 
-Все роуты регистрируются в `build_app`; все, кроме `/`, `/health`, `/chat`, требуют `_require_owner` (валидация initData + проверка tenant). TickTick-клиент арендатора резолвится через `_tt_for` (`get_user_ticktick(uid)`) — мультиарендно, каждый видит только свой TickTick.
+Все роуты регистрируются в `build_app`; все, кроме `/`, `/health`, `/chat`, требуют `_require_owner` (валидация initData + `_is_owner`). TickTick-клиент резолвится через `_tt_for` → `resolve_ticktick()` — единственный на инстанс.
 
 - **`GET/POST /api/data`** (`api_data`) — главный payload Mini App. Возвращает `{projects, chats, botUsername, needsTickTick}`. `projects` = `tt.get_projects()` арендатора (502 `ticktick_unreachable` при ошибке). `chats` = `list_known_chats(owner_id, include_unowned)` (primary owner видит ещё и legacy/unowned чаты), обогащённые binding'ом (`list_project_bindings`), `lastMessageAt`, `alias`, `activityScore`, `kind` (group/dm по префиксу `group_`). Отсортированы по `activityScore` убыв. `needsTickTick=true`, если у арендатора не подключён TickTick.
 - **`GET /api/settings?chatId=...`** (`api_get_settings`) — настройки одного чата (или `__global__`, дефолт). Возвращает только whitelisted поля из `_SETTINGS_FIELDS` (`alias, who, topics, task_side, importance, people, filter_rules, extract_rules, section_map`), отсекая несериализуемые Mongo-поля.
@@ -430,126 +427,60 @@ Mini App и система per-chat настроек бота. Основано 
 
 ---
 
-# 4. Мульти-тенант (multihub)
+# 4. Single-tenant + distribution
 
-Крупная фича, превращающая «Большого Брата» из single-owner бота (один хозяин → один общий TickTick) в **мульти-тенантную платформу**: один экземпляр обслуживает несколько независимых пользователей, у каждого — свои переписки, свои учётные данные и свой TickTick. Собрана серией коммитов `fc46030 → 393ddab` строго аддитивно.
+Раньше здесь была мульти-тенантная («multihub») машинерия: один экземпляр пытался обслуживать несколько независимых пользователей, у каждого — свой зашифрованный vault и свой TickTick. Это **удалено** (ветка `feat/single-tenant-and-autoupdate`): модель проекта — строго **SELF-HOST**, каждый разворачивает СВОЙ полностью изолированный инстанс (свой бот, своя MongoDB, свой Anthropic-ключ, свой ticktick-mcp). Один экземпляр обслуживает ровно **одного** владельца. Дистрибуция (форк + автосинк, `/invite`, `/setup`, «разверни своего бота») — это и есть модель распространения; она сохранена (см. 4.3 и раздел [5](#5-онбординг-коннекторов)).
 
-Ключевые модули: `app/onboarding/{crypto,vault,ticktick_resolve}.py`, `app/repositories.py` (реестр connection→owner), `app/pipeline/batch.py` (per-tenant роутинг), `app/telegram/{handlers_messages,handlers_ui}.py`, `app/web/server.py`, `app/db.py`, `.github/workflows/sync-upstream.yml`.
+Ключевые модули: `app/repositories.py` (owner id в `bot_state`), `app/pipeline/batch.py` (единый TickTick), `app/telegram/{handlers_messages,handlers_ui}.py`, `app/web/server.py`, `app/ticktick/mcp_client.py` (`resolve_ticktick`), `.github/workflows/sync-upstream.yml`.
 
-## 4.1 Модель tenancy, owner = user #1
+## 4.1 Owner = user #1
 
-**Tenant** — Telegram-пользователь, к чьему Telegram Business-аккаунту подключён бот. Технически «быть tenant'ом» = владеть хотя бы одной записью в реестре `business_connections` (`repo.get_owner_connection_count(user_id) > 0`), либо быть «первичным владельцем».
+Владелец — единственный. `bot_state.owner_id` ставится **ровно один раз**, при первом апдейте `business_connection` (`on_business_connection`: `if await repo.get_bot_state(OWNER_ID_KEY) is None`). Повторное подключение (владелец переподключил бота) обновляет `business_connection_id`, но не меняет, кто владелец. Реестра `business_connections` (connectionId→owner) больше нет — сообщения не размечаются по тенанту, и на `chat_state` не пишется `ownerId`.
 
-Как становятся tenant'ом (`on_business_connection`):
-- Telegram присылает апдейт `business_connection` при подключении бота к Premium/Business-аккаунту.
-- Бот вызывает `repo.set_business_connection(conn.id, conn.user.id, conn.is_enabled)` — пишет **connectionId → ownerId** в `business_connections`.
-- Все дальнейшие сообщения несут `business_connection_id`, по которому восстанавливается владелец.
+**Direction.** `on_business_message` вычисляет `direction = "out"`, если отправитель == `bot_state.owner_id` (владелец сам написал), иначе `"in"`. Для групп то же самое (`on_group_message`). Один владелец → одна интерпретация направления.
 
-**Owner = user #1.** «Первичный владелец» (`bot_state.owner_id`) сохранён ради обратной совместимости: legacy-читатели, fallback для групповых чатов, bootstrap Mini App. Ставится **ровно один раз** при первом `business_connection`, если `owner_id` ещё пуст (`if await repo.get_bot_state(OWNER_ID_KEY) is None`) — второй tenant не «перехватывает» роль. После рефактора `644eb6f` («owner is just user #1») хозяин перестал быть привилегированным — обычный per-user lookup, с единственным исключением: одноразовый seed его legacy-TickTick.
+## 4.2 Единый TickTick (`resolve_ticktick`)
 
-**Изоляция direction.** `on_business_message` вычисляет направление per-connection: владельца связи достаёт `_conn_owner(business_connection_id)` (сначала `get_connection_owner`, при промахе — fallback на первичного `_owner_id()`), и `direction = "out"` только если отправитель == владелец **этой** связи. Сообщения tenant'ов A и B корректно размечаются, идя через один процесс.
+Нет per-user vault и нет per-chat резолвинга — на инстанс **один** TickTick-коннектор. `app/ticktick/mcp_client.py::resolve_ticktick() -> TickTickMCP | None`:
+- URL берётся из runtime-override в `bot_state["ticktick_mcp_url"]` (его пишет `/connect`), иначе из env `TICKTICK_MCP_URL` (`settings.ticktick_mcp_url`).
+- Если URL не задан вовсе — `None`, и задачи остаются локальными в Mongo (`ticktickTaskId=None`), пока URL не появится.
 
-## 4.2 Per-user encrypted credential vault (`fc46030`)
+Один и тот же клиент используют пайплайн (`batch.process_chat` → `resolve_ticktick()`), Mini App (`_tt_for`), Telegram-хендлеры (`_tt`) и watchdog (`_ticktick_ok`).
 
-**Что делает.** Хранилище учётных данных каждого пользователя, зашифрованных at-rest. Фундамент для TickTick и (в перспективе) Google.
+**`/connect <url>` (owner-only).** Владелец задаёт коннектор инстанса: валидируется `/mcp/` в URL, значение пишется в `bot_state["ticktick_mcp_url"]` (приоритет над env), сообщение best-effort удаляется (URL — это секрет), затем верификация через `tt.get_projects()`. Не-владельцу — «бот приватный».
 
-**Файлы:** `app/onboarding/crypto.py`, `app/onboarding/vault.py`, тесты `tests/test_onboarding_crypto.py`.
+**Gates (`handlers_ui.py`).** Остался один: `_is_owner(uid)` — по `bot_state["owner_id"]` (пока owner неизвестен, возвращает `True`, чтобы не залочить первичную настройку). Прежние `_is_tenant` / `_is_chat_owner` схлопнуты в него: bind/unbind/settings — только владелец.
 
-**Шифрование (`crypto.py`).**
-- **AES-256-GCM** для секретов at-rest: `encrypt_secret()` → `"v1:" + base64(iv(12) | tag(16) | ciphertext)`. `decrypt_secret()` бросает исключение при подделке/неверном ключе/битом формате (GCM-аутентификация).
-- Ключ выводится один раз на процесс (`@lru_cache`) из env `TOKEN_ENC_KEY`: 64 hex → 32 байта, либо base64 ровно в 32 байта, либо любая passphrase, растянутая через **scrypt** (n=2¹⁴, r=8, p=1, соль `tg-ai-assistant.token.v1`). Схема портирована из Google MCP hub. Ротация ключа делает старый ciphertext нечитаемым — ключ должен быть стабилен.
-- Дополнительно: `sign()`/`verify()` — HMAC-SHA256 (constant-time) для tamper-proof OAuth-ссылок/state; `new_token()` — URL-safe случайный bearer.
+**Mini App.** `_require_owner` → `_is_owner(uid)`. `_tt_for` → `resolve_ticktick()`. `api_data` отдаёт `list_known_chats()` (все чаты — они все принадлежат владельцу); `needsTickTick: tt is None` подсказывает `/connect`.
 
-**Хранилище (`vault.py`).** Коллекция `user_credentials`, ключ уникальности `(userId, provider, label)`:
-- `userId` — telegram user id, `provider` — `"ticktick"`/`"google"`, `label` (default `"default"`).
-- `accessEnc`, `refreshEnc` — зашифрованные токены; `extraEnc` — зашифрованный JSON-blob (например, TickTick v2-cookie, **mcp_url**); `updatedAt`.
-- API: `save_credential` / `get_credential` / `list_credentials` / `delete_credential` / `ensure_indexes`.
-- **Merge-safe save:** `extra` мержится с уже сохранённым (`{**_dec_json(existing), **extra}`), чтобы добавление v2-cookie не затирало ранее сохранённый mcp_url; аналогично сохраняется ротированный `refreshEnc`, если новый refresh не передан.
+## 4.3 Fork auto-update distribution (Variant A — native fork)
 
-**Гарантия изоляции:** каждая запись жёстко привязана к `userId`; чтение всегда с фильтром по `userId`. Секреты только зашифрованными, расшифровать может только владелец-процесс с `TOKEN_ENC_KEY`.
+**Что делает.** «Выпустить один раз — обновятся все». Каждый self-hoster держит **форк** публичного репо и подключает к Railway **именно форк** (не upstream) — Railway пересобирает только по push в подключённый репозиторий, поэтому подключение форка критично.
 
-## 4.3 Per-user TickTick — инвариант «никогда в owner'а»
+**Установщик (`scripts/setup.sh`).** Автоматизирует настройку: через `gh` форкает upstream (`gh repo fork donskikhmaksim/tg-ai-assistant --clone=false`, идемпотентно), включает Actions на форке (`gh api -X PUT /repos/$USER/tg-ai-assistant/actions/permissions -f enabled=true`) и подключает форк как источник Railway (`railway service source connect --repo "$USER/tg-ai-assistant" --branch main`). Если `gh` не установлен/не залогинен — печатает веб-фолбэк (ссылка `…/fork` + включение Actions вручную) и спрашивает GitHub-логин. Прежний баг: установщик подключал upstream напрямую → кросс-аккаунтный deploy-on-push не срабатывал → инстансы «замерзали».
 
-Эволюция из трёх шагов:
-- **Вариант A (`0c5efbf`, удалён).** Бот держал OAuth-токены каждого юзера и ходил в его TickTick через официальный Open API (`ticktick_api.py`, refresh на 401).
-- **Вариант B (`5cf0ca5`, актуальный).** Официального API v1 недостаточно — нужны v2-фичи (теги, секции, completed через `t`-cookie), которые реализует **ticktick-mcp**. Каждый пользователь держит **свой** ticktick-mcp-адаптер, а бот хранит per-user **URL адаптера** в vault. `ticktick_api.py` удалён.
-
-**Резолвер (`app/onboarding/ticktick_resolve.py`).**
-- `set_user_mcp_url(user_id, url)` → `vault.save_credential(user_id, "ticktick", extra={"mcp_url": url})`. Сам URL вида `https://<...>.up.railway.app/mcp/<секрет>` **является** credential'ом (секрет в пути).
-- `get_user_mcp_url(user_id)` → достаёт из vault.
-- `get_user_ticktick(user_id) -> Optional[TickTickMCP]` — строит `TickTickMCP(url=...)` для URL **этого** пользователя, либо `None`.
-
-**Критичная гарантия «никогда в owner'а» (`fc26159` → `644eb6f`).** Hard-инвариант проекта:
-- Изначально при отсутствии per-user URL был fallback на глобальный env `TICKTICK_MCP_URL`. Но глобальный URL — **личный аккаунт владельца**, и такой fallback сваливал бы чужие задачи в TickTick хозяина.
-- `fc26159`: fallback на глобальный URL применяется, только если запрашивающий **сам owner**; все остальные без коннектора получают `None`.
-- `644eb6f`: runtime-fallback **удалён полностью**. Глобальный `TICKTICK_MCP_URL` служит только **одноразовым migration seed**: `seed_owner_from_env(user_id)` при первом резолве owner'а (и на `business_connection`) копирует legacy-env-URL в его vault-запись, после чего даже owner — обычный per-user lookup. `seed_owner_from_env` идемпотентна, никогда не перезаписывает сохранённый URL.
-
-**Итог:** пользователь без коннектора → `get_user_ticktick` возвращает `None` → задачи остаются локальными в Mongo и **не пушатся никому**.
-
-## 4.4 Per-tenant routing + UI-изоляция (`c594182`, `94278a1`)
-
-**Реестр connection→owner (`app/repositories.py`).** Коллекция `business_connections` (`connectionId`, `ownerId`, `isEnabled`, `updatedAt`):
-- `set_business_connection` / `get_connection_owner` / `get_owner_connection_count`.
-- **`resolve_chat_owner(chat_id)`** — главная функция роутинга: какому tenant'у принадлежат задачи чата. Сначала `ownerId`, застампленный на `chat_state` при ingest'е (per-connection); при промахе — fallback на legacy `bot_state.owner_id`. `None`, только если владелец вообще неизвестен.
-
-**Стамп владельца при ingest'е.** `save_raw_message(..., owner_id)` → `touch_chat_state` пишет `ownerId` на `chat_state`. `owner_id` для бизнес-сообщения резолвится через `_conn_owner(connection_id)` per-connection, для групп — через первичного `_owner_id()`.
-
-**Роутинг в pipeline (`process_chat`).** После извлечения задач:
-```
-owner = await repo.resolve_chat_owner(chat_id)
-tt = await get_user_ticktick(owner)   # None → задачи локальны
-```
-Этот per-user клиент `tt` прокидывается через `_create_new_tasks`, `_apply_status_updates`, `_route_rejected` и `_resolve_project`/`_resolve_default_section`. Если `tt is None` — задача пишется в Mongo с `ticktickTaskId=None` и никуда не пушится. Удалённые lookup'ы проектов/секций идут через клиент **именно этого** владельца.
-
-**UI-изоляция (Mini App).**
-- `_require_owner` → `_is_known_tenant(uid)`: валидирует initData и требует, чтобы юзер был tenant'ом (первичный owner, или владелец бизнес-связи; на свежем боте без owner'а — bootstrap).
-- `_tt_for(data)` → TickTick **запрашивающего** tenant'а.
-- `api_data`: `list_known_chats(owner_id=str(uid), include_unowned=is_primary)` — tenant видит **только свои** чаты; первичный owner дополнительно видит «unowned» legacy/групповые, чтобы ничего не пропало при миграции. `needsTickTick: tt is None` — фронт подсказывает `/connect`.
-- `list_known_chats(owner_id, include_unowned)` фильтрует по `ownerId` (с опциональным `$or` на отсутствующий ownerId для первичного owner'а).
-
-## 4.5 `/connect` self-service + gates (`94278a1`)
-
-**Команда `/connect <url>` (`handlers_ui.py`).** Любой пользователь регистрирует **свой** ticktick-mcp:
-- Валидирует, что в URL есть `/mcp/` (иначе — инструкция на русском).
-- `set_user_mcp_url(str(uid), url)`.
-- **Секрет-гигиена:** URL — это credential, поэтому команда best-effort **удаляет сообщение** пользователя (`message.delete()`), чтобы секрет не оставался в истории Telegram.
-- **Верификация:** строит клиент и вызывает `tt.get_projects()`; при успехе — «✅ Твой TickTick подключён, можно /bind», иначе — «сохранил, но проверка не прошла».
-
-**Gates.**
-- `_is_owner(uid)` — первичный владелец (пока owner неизвестен — не блокирует, чтобы не залочить первую настройку).
-- **`_is_tenant(uid)`** — первичный owner **или** владелец собственной Business-связи (`get_owner_connection_count > 0`); гейт для DM self-service.
-- **`_is_chat_owner(uid, chat_key)`** — через `resolve_chat_owner`: только владелец конкретного чата может bind/unbind его; группы/legacy падают на первичного owner'а; неизвестный владелец → bootstrap разрешён.
-- `/start` role-based: owner → админ-меню (invite + подключить свои сервисы); пользователь с onboarding-доступом → onboarding-кнопки; tenant → главное меню + nudge `/connect`, если TickTick ещё не привязан; «чужой» → предложение развернуть свой экземпляр (см. [5.6](#56-публичный-self-host-онбординг)).
-
-**Allowlist / limits.** Отдельная invite-система (`app/onboarding/invites.py`) — см. раздел [5](#5-онбординг-коннекторов).
-
-## 4.6 Fork auto-update distribution — Model B (`393ddab`)
-
-**Что делает.** Позволяет мейнтейнеру «выпустить один раз — обновятся все». Каждый self-hoster держит **форк** публичного репо; Railway настроен на «Deploy on push».
-
-**Файл:** `.github/workflows/sync-upstream.yml`.
-- Cron `*/30 * * * *` (+ ручной `workflow_dispatch`).
+**Workflow (`.github/workflows/sync-upstream.yml`).**
+- Cron `*/5 * * * *` (+ ручной `workflow_dispatch`).
 - **Guard:** `if github.repository != 'donskikhmaksim/tg-ai-assistant'` — в самом upstream не запускается, только в форках.
 - Шаг: добавляет upstream remote, `git fetch`, и если upstream — предок HEAD, ничего не делает; иначе `git merge --ff-only`. **Только fast-forward** — локальные коммиты форка никогда не затираются; при дивергенции — `::warning::` и skip.
-- После push в форк Railway пересобирает инстанс.
+- После push в форк Railway пересобирает инстанс (в течение ~5 минут).
 
-**Изоляция данных.** Workflow трогает только код, не секреты и не данные. Каждый форк = свой бот, своя MongoDB, свой ticktick-mcp. `DEPLOY.md` документирует минимум из 3 секретов (`BOT_TOKEN`, `ANTHROPIC_API_KEY`, `MONGO_URL`) и что TickTick подключается in-bot через `/connect`.
+**Изоляция данных.** Workflow трогает только код, не секреты и не данные. Каждый форк = свой бот, своя MongoDB, свой ticktick-mcp. `DEPLOY.md` документирует минимум из 3 секретов (`BOT_TOKEN`, `ANTHROPIC_API_KEY`, `MONGO_URL`) и что TickTick задаётся через `TICKTICK_MCP_URL` или in-bot через `/connect`.
 
-## 4.7 Индексы и незавершённое
+## 4.4 Индексы и замечания
 
-**Индексы (`app/db.py`, `94278a1`).** На старте: `chat_state.ownerId`, `business_connections.connectionId` (unique), `business_connections.ownerId`, `user_credentials (userId, provider, label)` unique (индекс vault раньше не создавался — исправлено).
+**Индексы (`app/db.py`).** Мульти-тенантные индексы удалены (`chat_state.ownerId`, `business_connections.*`, `user_credentials`). Остаются per-chat / бизнес-логические индексы (`chat_state.chatId` unique, `chat_project_map.chatId`, `tasks.dedupHash` unique и т.д.).
 
-**⚠️ Незавершённое / замеченные разрывы изоляции:**
-1. **Web-эндпоинты не проверяют владельца конкретного чата.** В отличие от Telegram-хендлеров (`_is_chat_owner` per-chat), `api_bind` / `api_unbind` / `api_save_settings` / `api_bulk_settings` гейтятся только через `_require_owner` — «это вообще какой-то tenant», но **не** «этот `chatId` принадлежит ему». Tenant, знающий/подобравший чужой `chatId`, может привязать/отвязать проект или переписать настройки чужого чата. `api_bulk_settings` пишет в произвольные `targetIds` без owner-фильтра. Реальный cross-tenant write-разрыв — стоит закрыть проверкой `resolve_chat_owner(chatId) == uid`.
-2. **`list_project_bindings()` не owner-scoped:** `api_data` тянет ВСЕ биндинги всех tenant'ов в память и матчит по `chatId`. Утечки в ответ нет (чаты уже отфильтрованы), но это глобальное чтение в мульти-тенантном пути.
-3. **Google-провайдер в vault заявлен, но per-user routing для Google в pipeline не подключён** — доведено до конца только для TickTick; онбординг Google идёт отдельной invite-веткой (`834c445`), `provider="google"` — задел на будущее.
-4. **Legacy env `TICKTICK_MCP_URL`** остаётся «мёртвым грузом» после seed'а — удаляется вручную; в конфиге всё ещё присутствует (`ticktick_mcp_url`).
+**Замечания:**
+1. **Web-эндпоинты и владелец чата.** `api_bind` / `api_unbind` / `api_save_settings` / `api_bulk_settings` гейтятся `_require_owner` (== единственный владелец). В single-tenant это уже полный контроль — прежний cross-tenant write-разрыв неприменим.
+2. `app/onboarding/crypto.py` (+ `tests/test_onboarding_crypto.py`) после удаления vault не используется в рантайме — оставлен как хелпер; `TOKEN_ENC_KEY` больше не требуется для TickTick.
+3. **Риск при миграции:** если у владельца URL TickTick был задан **только** через `/connect` (в старом vault, а не в env `TICKTICK_MCP_URL`), после этого рефактора он не переносится автоматически — перед деплоем убедиться, что `TICKTICK_MCP_URL` задан в env (или переподключить `/connect`).
 
 ---
 
 # 5. Онбординг коннекторов
 
-Слой self-service подключения внешних сервисов (TickTick и Google). Логика — в `app/telegram/handlers_ui.py`, вспомогательные модули — `app/onboarding/` (`invites.py`, `notes.py`, `ticktick_resolve.py`), конфигурация — `app/config.py` (блок `onboarding_*` + `notes_base_url` + `google_dashboard_add_url`). Ключевой принцип: секреты владельца (shared OAuth-client id/secret, relay-secret, dashboard-secret) **никогда не оседают в истории Telegram**. Они доставляются исключительно через одноразовые self-destruct notes, которые уничтожаются после первого открытия и живут 5 минут (`NOTE_TTL_SECONDS = 300`).
+Слой self-service подключения внешних сервисов (TickTick и Google). Логика — в `app/telegram/handlers_ui.py`, вспомогательные модули — `app/onboarding/` (`invites.py`, `notes.py`), конфигурация — `app/config.py` (блок `onboarding_*` + `notes_base_url` + `google_dashboard_add_url`). Ключевой принцип: секреты владельца (shared OAuth-client id/secret, relay-secret, dashboard-secret) **никогда не оседают в истории Telegram**. Они доставляются исключительно через одноразовые self-destruct notes, которые уничтожаются после первого открытия и живут 5 минут (`NOTE_TTL_SECONDS = 300`).
 
 ## 5.1 Role-based `/start` — что видит owner, invited и stranger
 
@@ -559,8 +490,7 @@ tt = await get_user_ticktick(owner)   # None → задачи локальны
 1. **Invite deep link** — если `command.args` начинается с `inv_` (`?start=inv_<token>`). Токен редимится через `redeem_invite`; успех → `_onboarding_menu()` («Приглашение принято! Выбери, что подключить…»), провал → «недействительно или уже использовано».
 2. **Owner** (`_is_owner(uid)`) — по `bot_state["owner_id"]`. Пока owner неизвестен, функция возвращает `True`, чтобы не заблокировать первичный bootstrap. Owner видит `_owner_menu()`: «👋 Панель Большого Брата» с кнопками пригласить / добавить Google-аккаунт / подключить Google / подключить TickTick.
 3. **Invited** (`has_access(uid)`) — тот, кто редимнул валидный инвайт (запись в `onboarding_access`). Видит `_onboarding_menu()` — только две кнопки подключения своих сервисов.
-4. **Tenant** (`_is_tenant`) — owner ИЛИ пользователь, подключивший свой Business-аккаунт (`get_owner_connection_count > 0`). Получает `_main_menu()` (привязки проектов) и подсказку сделать `/connect`, если свой TickTick ещё не привязан.
-5. **Stranger** — предложение развернуть СВОЙ изолированный инстанс (см. [5.6](#56-публичный-self-host-онбординг)).
+4. **Stranger** — предложение развернуть СВОЙ изолированный инстанс (см. [5.6](#56-публичный-self-host-онбординг)). (Владелец управляет привязками через `_main_menu()` по `/app` или кнопкам меню — не через `/start`.)
 
 **Security rationale.** Роль вычисляется на сервере по состоянию в БД, а не по чему-либо из сообщения. Меню с секрето-раздающими кнопками физически не рендерятся для strangers.
 
@@ -648,7 +578,7 @@ tt = await get_user_ticktick(owner)   # None → задачи локальны
 - Рекомендованный путь — кнопка **Deploy on Railway** (template URL автора). Railway создаёт сервис бота, добавляется MongoDB через plugin (`MONGO_URL=${{MongoDB.MONGO_URL}}`), секреты — в dashboard Variables.
 - Минимальная конфигурация — три секрета плюс timezone: `BOT_TOKEN`, `ANTHROPIC_API_KEY`, `MONGO_URL`, `DEFAULT_TIMEZONE`. TickTick подключается изнутри бота командой `/connect …`, а не через env (хотя можно предзадать `TICKTICK_MCP_URL`).
 - Изоляция по каждому ресурсу: свой bot читает только подключённые чаты; своя MongoDB держит captured messages, tasks, summaries; свой Anthropic key оплачивает Claude-вызовы; свой `ticktick-mcp` держит TickTick-токены.
-- Автообновление без потери данных: deployer форкает репо, включает Railway «Deploy on push» и workflow `sync-upstream.yml`, который каждые 30 минут fast-forward-ит fork (см. [4.6](#46-fork-auto-update-distribution--model-b-393ddab)). Синхронизируется **только код**.
+- Автообновление без потери данных: `scripts/setup.sh` форкает репо, включает Actions на форке и подключает **форк** к Railway «Deploy on push»; workflow `sync-upstream.yml` каждые ~5 минут fast-forward-ит fork (см. [4.3](#43-fork-auto-update-distribution-variant-a--native-fork)). Синхронизируется **только код**.
 
 **Файлы:** `README.md`, `DEPLOY.md`, `railway.toml`, `.github/workflows/sync-upstream.yml`.
 
@@ -740,7 +670,8 @@ tt = await get_user_ticktick(owner)   # None → задачи локальны
 - Tier-1 Qwen как fail-open гейт перед Claude, Tier-2 извлечение с инкрементальной схемой и долговременной памятью, retrieval-память на эмбеддингах.
 - CLI shim-путь (`_extract_via_cli`, подписка `claude -p`) — код в `main`.
 - Mini App: accordion-карточки, поиск, alias, привязка проекта/раздела, семь полей настроек, глобальные настройки, bulk apply, section-routing; весь JSON API.
-- Мульти-тенант: per-user vault (AES-256-GCM), per-user TickTick с инвариантом «никогда в owner'а», per-tenant routing в пайплайне, `/connect`, invite-система, fork auto-update.
+- Single-tenant: один владелец (`bot_state.owner_id`), один TickTick-коннектор (`resolve_ticktick`: `bot_state["ticktick_mcp_url"]` от `/connect` или env `TICKTICK_MCP_URL`).
+- Дистрибуция: invite-система, `/setup` install-команды, «разверни своего бота» и fork auto-update (native fork + Actions, синк каждые ~5 мин).
 - Онбординг коннекторов через zero-knowledge self-destruct notes, Google OAuth relay, публичный self-host онбординг.
 - Веб-страница переписки с подписанным токеном, healthcheck-эндпоинт, docker-compose и Railway-пути.
 
@@ -749,4 +680,4 @@ tt = await get_user_ticktick(owner)   # None → задачи локальны
 - **Tier-1 Qwen / Whisper — 404.** Локальные модели (Qwen через Ollama, Whisper-транскрипция) отдают 404. Благодаря fail-open/fail-soft это не роняет пайплайн (Qwen-404 → окно пропускается к Claude; Whisper-404 → голосовое просто не захватывается), но триаж и транскрипция фактически не работают.
 - **Watchdog ещё не в `main`.** Daily extraction watchdog (`app/pipeline/watchdog.py`, `healthcheck_*`, cron-джоба) живёт только в ветке `feat/extraction-watchdog` и не влит — то есть автоматического оповещения владельца о вышеописанных отказах в проде сейчас нет.
 - **Ветки `main` / `v9hk5t` разошлись (diverged).** Требуется ручная сверка/мёрж; fast-forward автосинк при дивергенции намеренно останавливается.
-- **Известные разрывы изоляции (не блокеры, но открыты):** web-эндпоинты (`api_bind`/`api_unbind`/`api_save_settings`/`api_bulk_settings`) не проверяют владельца конкретного чата; `list_project_bindings()` не owner-scoped; transcript-токен без expiry. Google per-user routing в пайплайне не подключён (задел). Legacy `TICKTICK_MCP_URL` остаётся мёртвым грузом после seed'а.
+- **Замечания (single-tenant):** прежние cross-tenant разрывы неприменимы — все API-эндпоинты гейтятся `_require_owner` (== единственный владелец). Transcript-токен по-прежнему без expiry. `app/onboarding/crypto.py` после удаления vault не используется в рантайме (оставлен как хелпер; `TOKEN_ENC_KEY` больше не нужен). Google per-user routing удалён вместе с мульти-тенантом.

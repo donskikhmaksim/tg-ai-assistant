@@ -24,9 +24,9 @@ Gather these first — the bot won't start usefully without them:
   (Alternative: a `claude -p` HTTP shim + `CLAUDE_CLI_URL`/`CLAUDE_CLI_TOKEN` to
   run extraction on a Claude Code subscription instead of the API — optional,
   see `.env.example`.)
-- **A vault key** (`TOKEN_ENC_KEY`) — generate once with `openssl rand -hex 32`
-  and keep it stable. It encrypts the credential vault where your `/connect`'ed
-  ticktick-mcp URL lives; **without it TickTick cannot be connected**.
+- **Your own `ticktick-mcp` URL** (`TICKTICK_MCP_URL`) — the single TickTick
+  connector for this instance. Set it in env now, or connect it from inside the
+  bot later with `/connect` (see below). No vault key is needed.
 - **Your own `ticktick-mcp` instance** — this is what determines whose TickTick
   account tasks land in, so it **must be yours**:
   1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> — see the
@@ -73,11 +73,10 @@ truth; the short version:
 Three equivalent ways to get the service:
 
 - **One-command installer** (easiest): [`scripts/setup.sh`](scripts/setup.sh)
-  drives the Railway CLI end-to-end — creates the project, adds MongoDB,
-  connects this repo as the source, generates a domain, and sets the core env
-  vars from `--bot-token` / `--anthropic-key` / `--timezone` arguments. Note:
-  it does **not** set `TOKEN_ENC_KEY` — add that one in the dashboard afterwards
-  (see step c).
+  drives the Railway CLI end-to-end — creates the project, adds MongoDB, **forks
+  this repo into your GitHub account and connects the fork** as the source (so
+  Railway auto-redeploys — see step g), generates a domain, and sets the core
+  env vars from `--bot-token` / `--anthropic-key` / `--timezone` arguments.
 - The **Deploy on Railway** template button in the [README](README.md), if a
   template has been published.
 - Manually: create a Railway service from your fork of this repo.
@@ -105,18 +104,16 @@ In the bot service → **Variables**, set the values from
 | `BOT_TOKEN`         | your BotFather token                                         |
 | `ANTHROPIC_API_KEY` | your Anthropic key                                           |
 | `MONGO_URL`         | `${{MongoDB.MONGO_URL}}`                                     |
-| `TOKEN_ENC_KEY`     | `openssl rand -hex 32` — encrypts the credential vault       |
 | `DEFAULT_TIMEZONE`  | your IANA zone, e.g. `Europe/Moscow` (default `UTC`)         |
 | `WEBAPP_URL`        | your service's public https origin (for the Mini App button) |
 
-That's the whole minimum — four secrets (`BOT_TOKEN`, `ANTHROPIC_API_KEY`,
-`MONGO_URL`, `TOKEN_ENC_KEY`) plus your timezone. **TickTick is connected from
-inside the bot**, not via env: after the service is up, DM it
-`/connect https://<your ticktick-mcp>.up.railway.app/mcp/<secret>` — the URL is
-stored encrypted in the vault (that's what `TOKEN_ENC_KEY` is for) and the
-message is deleted from the chat. (You can still preset it with the
-`TICKTICK_MCP_URL` env var if you prefer; it is seeded into the vault on first
-contact.)
+That's the whole minimum — three secrets (`BOT_TOKEN`, `ANTHROPIC_API_KEY`,
+`MONGO_URL`) plus your timezone. **TickTick** is the single global connector for
+the instance: set `TICKTICK_MCP_URL` here in env, **or** connect it from inside
+the bot — after the service is up, DM it
+`/connect https://<your ticktick-mcp>.up.railway.app/mcp/<secret>`. `/connect`
+stores the URL as a runtime override in `bot_state` (taking priority over the
+env) and deletes the message from the chat. No vault, no `TOKEN_ENC_KEY`.
 
 Everything else is optional and documented inline in
 [`.env.example`](.env.example). Highlights:
@@ -182,7 +179,11 @@ binds chats to TickTick projects; unbound chats fall back to
 
 Your instance runs your data on your infra, but its **code** can track the
 maintainer's automatically — so you get new features and fixes without doing
-anything:
+anything. The one-command installer (`scripts/setup.sh`) sets this up for you:
+it forks this repo into your GitHub account with `gh`, enables Actions on the
+fork, and connects the **fork** (not the upstream) as the Railway source — the
+critical detail, since Railway only redeploys on a push into the repo it is
+connected to. If you deployed some other way, do it manually:
 
 1. **Deploy from your fork**, not from a manual upload. In the Railway service →
    **Settings → Source**, connect it to *your* fork's `main` and turn on **Deploy
@@ -192,7 +193,7 @@ anything:
    by default).
 
 That's it. The bundled [`Sync from upstream`](.github/workflows/sync-upstream.yml)
-workflow fast-forwards your fork from the maintainer every 30 minutes; each sync
+workflow fast-forwards your fork from the maintainer every ~5 minutes; each sync
 pushes to your `main`, which triggers a Railway redeploy. You can also trigger it
 on demand: **Actions → Sync from upstream → Run workflow**.
 
@@ -211,7 +212,7 @@ and not started by compose; point the bot at those via your `.env`.
 
 ```bash
 cp .env.example .env
-# edit .env: BOT_TOKEN, ANTHROPIC_API_KEY, TOKEN_ENC_KEY, DEFAULT_TIMEZONE, …
+# edit .env: BOT_TOKEN, ANTHROPIC_API_KEY, TICKTICK_MCP_URL, DEFAULT_TIMEZONE, …
 # (leave MONGO_URL as-is — compose overrides it to reach the bundled mongo)
 docker compose up -d
 docker compose logs -f bot

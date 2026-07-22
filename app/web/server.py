@@ -21,10 +21,8 @@ from aiohttp import web
 
 from .. import repositories as repo
 from ..config import get_settings
-from ..onboarding.ticktick_resolve import get_user_ticktick
 from ..telegram.notify import group_watch_announcement
-from ..tenancy import is_multi_tenant_allowed
-from ..ticktick.mcp_client import TickTickMCP
+from ..ticktick.mcp_client import TickTickMCP, resolve_ticktick
 from .auth import validate_init_data, verify_chat_token
 from .transcript import group_messages, initials, sender_color
 
@@ -39,38 +37,26 @@ async def _require_owner(request: web.Request) -> dict[str, Any]:
     data = validate_init_data(init_data, get_settings().bot_token)
     if not data:
         raise web.HTTPUnauthorized(text="invalid initData")
-    # Multi-tenant: any user with a registered Business connection is a valid
-    # tenant and manages ONLY their own chats/TickTick. Before any owner is
-    # known (fresh bot), any validly-signed user may bootstrap as primary owner.
     uid = data["user"].get("id")
-    if not await _is_known_tenant(uid):
-        raise web.HTTPForbidden(text="not a connected tenant")
+    if not await _is_owner(uid):
+        raise web.HTTPForbidden(text="not the owner")
     return data
 
 
-async def _is_known_tenant(uid: int | None) -> bool:
-    """True if this user owns a Business connection (multi-tenant) or is the
-    legacy primary owner, or no owner is known yet (bootstrap).
-
-    Single-tenant lock: while multi-tenant is OFF (the default) the Mini App
-    serves ONLY the primary owner (and the first user on a fresh deploy, who
-    bootstraps as that owner). A second user's Business connection is not enough."""
+async def _is_owner(uid: int | None) -> bool:
+    """True for the single owner. Before any owner is known (fresh bot) any
+    validly-signed user may bootstrap as that owner."""
     if uid is None:
         return False
-    primary = await repo.get_bot_state(OWNER_ID_KEY)
-    if primary is None:
+    owner = await repo.get_bot_state(OWNER_ID_KEY)
+    if owner is None:
         return True  # fresh bot — allow bootstrap
-    if int(primary) == uid:
-        return True
-    if not is_multi_tenant_allowed():
-        return False
-    return await repo.get_owner_connection_count(str(uid)) > 0
+    return int(owner) == uid
 
 
-async def _tt_for(data: dict[str, Any]) -> TickTickMCP | None:
-    """The requesting tenant's own TickTick client (or None if not connected)."""
-    uid = data["user"].get("id")
-    return await get_user_ticktick(str(uid)) if uid is not None else None
+async def _tt_for(_data: dict[str, Any]) -> TickTickMCP | None:
+    """The single global TickTick client (or None if not configured)."""
+    return await resolve_ticktick()
 
 
 # ---------------------------------------------------------------------------
@@ -262,13 +248,7 @@ _CHAT_TEMPLATE = """<!DOCTYPE html>
 
 async def api_data(request: web.Request) -> web.Response:
     data = await _require_owner(request)
-    uid = data["user"].get("id")
     tt = await _tt_for(data)
-
-    # A tenant sees only their own chats. The primary owner also sees legacy /
-    # group chats with no owner stamped yet, so nothing vanishes mid-migration.
-    primary = await repo.get_bot_state(OWNER_ID_KEY)
-    is_primary = primary is not None and uid == int(primary)
 
     # Degrade instead of failing the whole endpoint: if TickTick is down the
     # Mini App still shows chats/settings, with a "projects unavailable" banner
@@ -282,7 +262,7 @@ async def api_data(request: web.Request) -> web.Response:
             logger.exception("get_projects failed")
             projects_error = True
 
-    chats = await repo.list_known_chats(owner_id=str(uid), include_unowned=is_primary)
+    chats = await repo.list_known_chats()
     bindings = {b["chatId"]: b for b in await repo.list_project_bindings()}
     msg_counts = await repo.chat_activity_scores()
     out_chats = []

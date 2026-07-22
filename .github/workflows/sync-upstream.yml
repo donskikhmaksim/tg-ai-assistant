@@ -2,7 +2,7 @@ name: Sync from upstream
 
 # Keeps a self-hoster's FORK current with the maintainer's repo, so their
 # Railway instance auto-redeploys whenever the maintainer ships. The maintainer
-# pushes once to their prod; within ~30 min every fork fast-forwards and Railway
+# pushes once to their prod; within ~5 min every fork fast-forwards and Railway
 # (watching each fork's branch with "Deploy on push") rebuilds it.
 #
 # Runs in forks ONLY (guarded below) and never touches your data or secrets —
@@ -11,7 +11,7 @@ name: Sync from upstream
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "*/5 * * * *"   # every 5 minutes
   workflow_dispatch: {}        # manual "Sync now" button in the Actions tab
 
 permissions:

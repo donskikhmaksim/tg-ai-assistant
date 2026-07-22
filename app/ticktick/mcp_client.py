@@ -461,3 +461,18 @@ def get_ticktick() -> TickTickMCP:
     if _client is None:
         _client = TickTickMCP()
     return _client
+
+
+async def resolve_ticktick() -> "TickTickMCP | None":
+    """The single global TickTick client for this (single-tenant) instance, or
+    None when no URL is configured — callers then keep tasks local.
+
+    There is exactly ONE TickTick account per deploy. The URL comes from the
+    owner-set runtime override in `bot_state` (written by `/connect`) if present,
+    otherwise from the `TICKTICK_MCP_URL` env (`settings.ticktick_mcp_url`). No
+    per-user vault, no per-chat resolution.
+    """
+    from .. import repositories as repo
+
+    url = await repo.get_bot_state("ticktick_mcp_url") or get_settings().ticktick_mcp_url
+    return TickTickMCP(url) if url else None

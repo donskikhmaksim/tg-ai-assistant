@@ -10,16 +10,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # ─────────────────────────────────────────────────────────────────────
-    # SINGLE-TENANT LOCK. Multi-tenant / multihub is intentionally OFF.
-    # Do NOT enable or rely on the multi-tenant path until there is an EXPLICIT
-    # instruction to. The distribution model is SELF-HOST: every person runs
-    # their OWN fully-isolated instance, so this instance must only ever serve
-    # the PRIMARY OWNER (owner = user #1). The multihub machinery deliberately
-    # STAYS in the code (per-user vault, per-user TickTick resolution) — it just
-    # degrades to "owner only" while this flag is False. Flip to True (env
-    # MULTI_TENANT_ENABLED=true) ONLY when onboarding other people is a
-    # deliberate, approved decision. See app/tenancy.py for the gate helper.
-    multi_tenant_enabled: bool = False
+    # SINGLE-TENANT by design. Every person deploys their OWN fully-isolated
+    # instance (own bot, own MongoDB, own Anthropic key, own ticktick-mcp); this
+    # instance only ever serves ONE owner (owner = user #1, the first Telegram
+    # user to connect Business). The distribution/onboarding layer (/invite,
+    # /setup, "deploy your own bot", fork auto-sync) hands OTHER people the tools
+    # to stand up their own instance — it never serves them on this one.
 
     # Telegram
     bot_token: str = ""

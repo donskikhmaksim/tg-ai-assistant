@@ -52,19 +52,23 @@ Live and verified in production (Railway, auto-deploy from `main`):
   Telegram-style transcript page with task deep links.
 - «Контроль» attribution, extraction watchdog (DMs the owner on chain
   breakage), opt-in end-of-day group summaries, voice transcription hook.
-- Per-user encrypted credential vault (`TOKEN_ENC_KEY`) + `/connect` self-serve
-  TickTick hookup; multi-tenant machinery present but locked to owner-only
-  (`MULTI_TENANT_ENABLED=false` — do not flip without explicit instruction).
-- Onboarding: invite-gated `/setup` connector installers + `scripts/setup.sh`
-  self-deploy of the bot itself; fork auto-sync workflow for deployers.
+- Strictly SINGLE-TENANT: one owner per instance (`bot_state.owner_id`), one
+  global TickTick connector via `resolve_ticktick()` (env `TICKTICK_MCP_URL` or
+  the `/connect`-set `bot_state["ticktick_mcp_url"]` override). The multi-tenant
+  serving machinery (per-user vault, connection→owner registry, per-chat owner
+  routing) was removed in `feat/single-tenant-and-autoupdate`.
+- Onboarding/distribution KEPT (that IS the model): invite-gated `/setup`
+  connector installers + `scripts/setup.sh` self-deploy of the bot (now forks
+  upstream into the deployer's GitHub and connects the fork); fork auto-sync
+  workflow (every ~5 min) for deployers.
 - Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
 
 Known loose ends:
 - Qwen/embeddings depend on an external Ollama endpoint (`QWEN_BASE_URL`); when
   unreachable, triage fails open to Claude and semantic dedup degrades to the
   exact-title hash — by design, but costlier.
-- `scripts/setup.sh` does not set `TOKEN_ENC_KEY` for the new deployer — it must
-  be added manually before `/connect` works (documented in DEPLOY.md).
+- `app/onboarding/crypto.py` (+ its test) is now unused at runtime after the
+  vault removal — kept as a helper; `TOKEN_ENC_KEY` is no longer required.
 - Docs (`README.md`, `DEPLOY.md`, `.env.example`) refreshed 2026-07-22 to match
   `app/config.py`; keep them in sync when adding settings.
 
