@@ -490,6 +490,37 @@ async def api_bulk_settings(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "count": len(target_ids)})
 
 
+async def api_cre_notify(request: web.Request) -> web.Response:
+    """POST /cre/notify — приём алярмов/сводок CRE-парсера (cre-parser/reporter.py).
+
+    Auth: Bearer CRE_NOTIFY_SECRET — отдельный лёгкий секрет, НЕ бот-токен.
+    Смысл: mac mini / CRE-сервис шлют отчёты в Telegram, вообще не касаясь
+    BOT_TOKEN — бот сам отправляет текст своим токеном в CRE_REPORT_CHAT_ID
+    (личка Максима, позже — группа). Только отправка (send-only): конфликтов
+    getUpdates это не создаёт. Пустые env → 503, чтобы сбой был явным.
+    """
+    import os
+
+    secret = os.environ.get("CRE_NOTIFY_SECRET", "")
+    chat_id = os.environ.get("CRE_REPORT_CHAT_ID", "")
+    auth = request.headers.get("Authorization", "")
+    if not secret or auth != f"Bearer {secret}":
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+    if not chat_id:
+        return web.json_response(
+            {"ok": False, "error": "CRE_REPORT_CHAT_ID не задан"}, status=503
+        )
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"ok": False, "error": "empty text"}, status=400)
+    await request.app["bot"].send_message(int(chat_id), text[:4000])
+    return web.json_response({"ok": True})
+
+
 def build_app(bot: Any) -> web.Application:
     app = web.Application()
     app["bot"] = bot
@@ -497,6 +528,7 @@ def build_app(bot: Any) -> web.Application:
         [
             web.get("/", health),
             web.get("/health", health),
+            web.post("/cre/notify", api_cre_notify),
             web.get("/app", serve_app),
             web.get("/chat", serve_chat),
             web.post("/api/data", api_data),
