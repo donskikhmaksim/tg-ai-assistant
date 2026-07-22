@@ -394,6 +394,7 @@ def _onboarding_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
             [InlineKeyboardButton(text="🤖 Развернуть своего бота", callback_data="onb:assistant")],
+            [InlineKeyboardButton(text="🔧 Развернуть свой n8n", callback_data="onb:n8n")],
         ]
     )
 
@@ -407,6 +408,7 @@ def _owner_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔗 Подключить Google", callback_data="onb:google")],
             [InlineKeyboardButton(text="🔗 Подключить TickTick", callback_data="onb:ticktick")],
             [InlineKeyboardButton(text="🤖 Развернуть своего бота", callback_data="onb:assistant")],
+            [InlineKeyboardButton(text="🔧 Развернуть свой n8n", callback_data="onb:n8n")],
         ]
     )
 
@@ -470,6 +472,11 @@ def _service_command(service: str, s) -> tuple[str, str] | None:
             f"--anthropic-key <ТВОЙ_ANTHROPIC_API_KEY>"
         )
         return ("Большой Брат — свой бот", cmd)
+    if service == "n8n":
+        # No owner-side secrets: a clean n8n has none; setup.sh interactively
+        # offers the optional email-triage pipeline. Always available.
+        cmd = f"bash <(curl -fsSL {s.onboarding_n8n_setup_url})"
+        return ("n8n — свой автоматизатор (+ опц. почтовый пайплайн)", cmd)
     return None
 
 
@@ -598,7 +605,7 @@ async def on_add_google(cb: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.in_({"onb:google", "onb:ticktick", "onb:assistant"}))
+@router.callback_query(F.data.in_({"onb:google", "onb:ticktick", "onb:assistant", "onb:n8n"}))
 async def on_onboarding_pick(cb: CallbackQuery) -> None:
     """Hand out one service's install command as a fresh 5-minute self-destruct note."""
     uid = cb.from_user.id if cb.from_user else None

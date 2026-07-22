@@ -190,6 +190,9 @@ class Settings(BaseSettings):
     # friend's OWN secrets (BotFather token + Anthropic key), passed as script args,
     # so there is nothing owner-side to configure — the button is always available.
     onboarding_assistant_setup_url: str = "https://github.com/donskikhmaksim/tg-ai-assistant/raw/main/scripts/setup.sh"
+    # Self-deploy of n8n. Base has no owner-side secrets; the optional email
+    # pipeline is offered by setup.sh itself. Button always available.
+    onboarding_n8n_setup_url: str = "https://github.com/donskikhmaksim/n8n-railway/raw/main/scripts/setup.sh"
     # Owner-only "add my own Google account" button. Full add-account URL on the
     # Google MCP dashboard, e.g.
     # https://<google-mcp>.up.railway.app/dashboard/<DASHBOARD_SECRET>/add
