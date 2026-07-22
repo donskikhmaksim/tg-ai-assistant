@@ -21,17 +21,48 @@ Gather these first — the bot won't start usefully without them:
   - **Business Mode** (a.k.a. "Secretary Mode") → **Enable**.
   - **Group Privacy** → **Turn off** (so it can read group messages).
 - **Your own Anthropic API key** (`ANTHROPIC_API_KEY`) — usage is billed to it.
+  (Alternative: a `claude -p` HTTP shim + `CLAUDE_CLI_URL`/`CLAUDE_CLI_TOKEN` to
+  run extraction on a Claude Code subscription instead of the API — optional,
+  see `.env.example`.)
+- **A vault key** (`TOKEN_ENC_KEY`) — generate once with `openssl rand -hex 32`
+  and keep it stable. It encrypts the credential vault where your `/connect`'ed
+  ticktick-mcp URL lives; **without it TickTick cannot be connected**.
 - **Your own `ticktick-mcp` instance** — this is what determines whose TickTick
   account tasks land in, so it **must be yours**:
-  1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> (its README +
-     `ONBOARDING` cover the `/setup` OAuth flow and generating `MCP_SECRET`).
-  2. Your `TICKTICK_MCP_URL` is
+  1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> — see the
+     [companion server](#the-companion-ticktick-mcp-server) section below for
+     what to configure there.
+  2. Your connector URL is
      `https://<your-app>.up.railway.app/mcp/<your MCP_SECRET>`.
   - ⚠️ **Never reuse a `ticktick-mcp` URL someone shared with you** — your tasks
     would be created in *their* account.
-- **Optional: Ollama** for cheap Tier-1 triage. If you don't provide it (or it's
-  unreachable), triage **fails open to Claude** — everything still works, it just
-  costs more. Host it anywhere reachable and set `QWEN_BASE_URL`.
+- **Optional: Ollama** for cheap Tier-1 triage, retrieval-memory embeddings, and
+  semantic dedup. If you don't provide it, triage is skipped (**fails open to
+  Claude** — everything still works, it just costs more) and
+  embeddings-dependent features fall back to simpler behavior. Host it anywhere
+  reachable and set `QWEN_BASE_URL` (embeddings share the same endpoint via
+  `EMBED_MODEL`).
+
+### The companion ticktick-mcp server
+
+The bot writes to TickTick through a separate MCP server you also deploy:
+<https://github.com/donskikhmaksim/ticktick-mcp>. Its README is the source of
+truth; the short version:
+
+- **`MCP_SECRET`** — generate your own (`openssl rand -hex 24`). It becomes the
+  URL path (`/mcp/<secret>`) that *is* the credential, and it also gates the
+  self-service **`/setup/<secret>`** browser page where you log in to *your own*
+  TickTick (OAuth) — no local CLI needed.
+- **`USER_TIMEZONE`** — your IANA zone for due-date handling (defaults to UTC).
+- **Optional `CLAUDE_CLI_URL`/`CLAUDE_CLI_TOKEN`** — enables the server's
+  destination-suggester (it asks a Claude shim which project/section fits a
+  task) for interactive use. Not required for this bot.
+- **`DIRECT_DELETE_CAP`** (default 1) — safety semantics: at most this many
+  tasks can be deleted per direct call, and only with an exact title match
+  (id↔title identity guard); anything bigger must go through the
+  plan → approve → execute manifest flow. The same guard family requires the
+  bot to pass the connection secret (`automation_key`) on direct creates and
+  the task title on completes — the bot does this automatically.
 
 ---
 
@@ -39,9 +70,19 @@ Gather these first — the bot won't start usefully without them:
 
 ### a. Create the service
 
-Use the **Deploy on Railway** button in the [README](README.md) (once you've
-published a template), or create the service manually from your fork. Either way
-you get a project containing the bot service.
+Three equivalent ways to get the service:
+
+- **One-command installer** (easiest): [`scripts/setup.sh`](scripts/setup.sh)
+  drives the Railway CLI end-to-end — creates the project, adds MongoDB,
+  connects this repo as the source, generates a domain, and sets the core env
+  vars from `--bot-token` / `--anthropic-key` / `--timezone` arguments. Note:
+  it does **not** set `TOKEN_ENC_KEY` — add that one in the dashboard afterwards
+  (see step c).
+- The **Deploy on Railway** template button in the [README](README.md), if a
+  template has been published.
+- Manually: create a Railway service from your fork of this repo.
+
+Either way you end up with a project containing the bot service.
 
 ### b. Add MongoDB
 
@@ -64,19 +105,41 @@ In the bot service → **Variables**, set the values from
 | `BOT_TOKEN`         | your BotFather token                                         |
 | `ANTHROPIC_API_KEY` | your Anthropic key                                           |
 | `MONGO_URL`         | `${{MongoDB.MONGO_URL}}`                                     |
+| `TOKEN_ENC_KEY`     | `openssl rand -hex 32` — encrypts the credential vault       |
 | `DEFAULT_TIMEZONE`  | your IANA zone, e.g. `Europe/Moscow` (default `UTC`)         |
 | `WEBAPP_URL`        | your service's public https origin (for the Mini App button) |
 
-That's the whole minimum — three secrets (`BOT_TOKEN`, `ANTHROPIC_API_KEY`,
-`MONGO_URL`) plus your timezone. **TickTick is connected from inside the bot**,
-not via env: after the service is up, DM it `/connect https://<your
-ticktick-mcp>.up.railway.app/mcp/<secret>`. (You can still preset it with the
-`TICKTICK_MCP_URL` env var if you prefer.)
+That's the whole minimum — four secrets (`BOT_TOKEN`, `ANTHROPIC_API_KEY`,
+`MONGO_URL`, `TOKEN_ENC_KEY`) plus your timezone. **TickTick is connected from
+inside the bot**, not via env: after the service is up, DM it
+`/connect https://<your ticktick-mcp>.up.railway.app/mcp/<secret>` — the URL is
+stored encrypted in the vault (that's what `TOKEN_ENC_KEY` is for) and the
+message is deleted from the chat. (You can still preset it with the
+`TICKTICK_MCP_URL` env var if you prefer; it is seeded into the vault on first
+contact.)
 
-Optional: `QWEN_BASE_URL` (if you host Ollama for the cheap Tier-1 gate — without
-it everything just goes to Claude, which works), `EMBED_MODEL` (retrieval
-memory), `ONBOARDING_REPO_URL` / `ONBOARDING_RAILWAY_TEMPLATE_URL` (the `/start`
-message shown to non-owners). Railway injects `PORT` automatically.
+Everything else is optional and documented inline in
+[`.env.example`](.env.example). Highlights:
+
+- `QWEN_BASE_URL` — an Ollama/OpenAI-compatible endpoint for the cheap Tier-1
+  gate (unset → everything goes straight to Claude, which works) and for
+  `EMBED_MODEL` embeddings (retrieval memory + semantic dedup).
+- `CLAUDE_CLI_URL` / `CLAUDE_CLI_TOKEN` — run extraction through a `claude -p`
+  shim (Claude Code subscription) instead of the paid API.
+- `CONTROL_MODE` / `CONTROL_MARKER` / `CONTROL_TAG` — how DM tasks whose action
+  is on the *other* person become tracked «Контроль» items.
+- `DEDUP_*` — the three-band semantic near-duplicate detection (on by default;
+  needs embeddings to actually engage).
+- `HEALTHCHECK_*` — the watchdog that probes Qwen → Claude → TickTick and DMs
+  you when the chain breaks (on by default).
+- `DAILY_SUMMARY` / `SUMMARY_HOUR` — opt-in end-of-day recap posted into groups.
+- `DEFAULT_PROJECT[_ID]` / `DEFAULT_SECTION[_ID]` — where tasks from unbound
+  chats land.
+- `TRANSCRIBE_URL` — a Whisper endpoint for voice/audio messages.
+- `ONBOARDING_*` / `NOTES_BASE_URL` — the `/start` text for non-owners and the
+  invite-gated `/setup` connector-onboarding buttons.
+
+Railway injects `PORT` automatically.
 
 > CLI alternative: the full `railway` CLI runbook is in [CLAUDE.md](CLAUDE.md).
 
@@ -92,15 +155,30 @@ want monitored.
 > the owner-id line never shows in the logs, re-add the bot in Telegram after the
 > service is up.
 
-### e. Verify
+### e. Connect your TickTick
+
+DM the bot:
+
+```
+/connect https://<your-ticktick-mcp>.up.railway.app/mcp/<MCP_SECRET>
+```
+
+The bot verifies the connector answers, stores the URL encrypted, and deletes
+your message (the URL is a secret). Then `/bind` in a group (or the Mini App)
+binds chats to TickTick projects; unbound chats fall back to
+`DEFAULT_PROJECT`/`DEFAULT_PROJECT_ID`.
+
+### f. Verify
 
 - Railway logs should show: `Mongo connected` → `Batch scheduler started` →
   (after you connect Business) `Business connection … for owner …`.
 - Message your bot `/start` — you should get the welcome + reply menu.
 - Send yourself a DM containing a task ("напомни завтра купить молоко") and
-  confirm it appears in your TickTick within a few minutes.
+  confirm it appears in your TickTick — the pipeline is debounced, so allow
+  ~10 minutes (`QUIET_MINUTES=8` of chat silence + a scheduler tick).
+- The built-in watchdog will DM you if the extraction chain breaks later.
 
-### f. Automatic updates (stay current with the maintainer)
+### g. Automatic updates (stay current with the maintainer)
 
 Your instance runs your data on your infra, but its **code** can track the
 maintainer's automatically — so you get new features and fixes without doing
@@ -133,14 +211,15 @@ and not started by compose; point the bot at those via your `.env`.
 
 ```bash
 cp .env.example .env
-# edit .env: BOT_TOKEN, ANTHROPIC_API_KEY, TICKTICK_MCP_URL, DEFAULT_TIMEZONE, …
+# edit .env: BOT_TOKEN, ANTHROPIC_API_KEY, TOKEN_ENC_KEY, DEFAULT_TIMEZONE, …
 # (leave MONGO_URL as-is — compose overrides it to reach the bundled mongo)
 docker compose up -d
 docker compose logs -f bot
 ```
 
-Then connect Telegram Business exactly as in [step 1d](#d-connect-telegram-business)
-and verify as in [step 1e](#e-verify).
+Then connect Telegram Business exactly as in [step 1d](#d-connect-telegram-business),
+connect TickTick as in [step 1e](#e-connect-your-ticktick), and verify as in
+[step 1f](#f-verify).
 
 Notes:
 - MongoDB data persists in the `mongo_data` volume.

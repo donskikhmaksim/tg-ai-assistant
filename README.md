@@ -29,13 +29,15 @@ The bot writes tasks through a `ticktick-mcp` server, and **that server holds th
 TickTick OAuth tokens — whoever's account it is bound to is where tasks land.**
 So you must deploy your **own** instance before anything else:
 
-1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> (its README +
-   `ONBOARDING` walk you through the `/setup` OAuth flow and generating your
-   `MCP_SECRET`).
-2. Set `TICKTICK_MCP_URL=https://<your-app>.up.railway.app/mcp/<your MCP_SECRET>`.
+1. Deploy <https://github.com/donskikhmaksim/ticktick-mcp> (its README walks you
+   through generating your `MCP_SECRET` and the browser `/setup/<MCP_SECRET>`
+   OAuth flow that binds it to *your* TickTick account).
+2. Once your bot is up, DM it
+   `/connect https://<your-app>.up.railway.app/mcp/<your MCP_SECRET>`
+   (or preset the same URL via the `TICKTICK_MCP_URL` env var).
 
-> ⚠️ **Never point `TICKTICK_MCP_URL` at someone else's ticktick-mcp** — your
-> extracted tasks would be created in *their* TickTick account. It must be yours.
+> ⚠️ **Never connect someone else's ticktick-mcp URL** — your extracted tasks
+> would be created in *their* TickTick account. It must be yours.
 
 Then follow **[DEPLOY.md](DEPLOY.md)** for the full step-by-step (Railway or VPS).
 
@@ -46,33 +48,58 @@ Telegram
   ├─ business_message  (DM: in + your outgoing)  ─┐
   └─ message           (groups, privacy off)      ─┤→ one bot / one backend
                                                     ↓ save EVERY update immediately
-                                        Mongo: raw_messages (TTL 30d, key chatId)
+                                        Mongo: raw_messages (TTL 90d, key chatId)
                                                     ↓ APScheduler, on a debounce
                      for each "dirty" chat → current CONVERSATION WINDOW
                                                     ↓
-                     Tier 1 — Qwen (Ollama): any task in the window? yes/no
-                                                    ↓ only "yes"
-                     Tier 2 — Claude (opus-4-8): window + known tasks + memory
-                                                → incremental JSON + updated summary
-                                                    ↓ dedup
-                     project: chat_project_map[chatId] ?? Inbox
+                     Tier 1 — Qwen (Ollama, optional): any task here? yes/no
+                                                    ↓ only "yes" (fails open)
+                     Tier 2 — Claude (API or `claude -p` shim): window + known
+                              tasks + memory + retrieval → incremental JSON
+                                                    ↓ semantic dedup (3-band + judge)
+                     project: topic route ?? chat binding ?? default project
                                                     ↓
-                     TickTick via Railway MCP (create_task / complete_task)
+                     your own ticktick-mcp (create / complete / enrich)
 ```
 
 Two memory mechanisms, kept separate (spec §7):
 
 - **Conversation window** — only "which fresh raw messages to look at now"
   (gap 6h, cap 48h).
-- **Long-term memory** — `chat_summary` + open tasks, independent of the raw
-  TTL. Claude refreshes the summary every run, so a topic revisited weeks later
-  (after the raw messages expired) is still understood.
+- **Long-term memory** — `chat_summary` + open tasks + (optionally) an embedded
+  archive of every processed message for retrieval, all independent of the raw
+  TTL. Claude refreshes the summary every run, so a topic revisited months
+  later (after the raw messages expired) is still understood.
+
+Beyond the core pipeline (all optional / configurable):
+
+- **Semantic dedup** — a new task is compared by embedding cosine against open
+  tasks (the chat's and the destination projects'); a gray zone goes to a cheap
+  LLM judge, and any uncertainty resolves to *create*, never drop.
+- **Topic routing** — one chat's tasks can fan out into several TickTick
+  projects by topic (a per-chat route map, e.g. «личное» → Inbox,
+  «работа» → Work); unlabelled tasks fall back to the chat's binding.
+- **«Контроль» tracking** — a DM task whose action is on the other person
+  becomes a marked follow-up item (`CONTROL_MODE`/`CONTROL_MARKER`/`CONTROL_TAG`).
+- **Watchdog** — probes Qwen → Claude → TickTick every 10 min and DMs you when
+  the chain breaks (new error immediately, then at most once a day).
+- **End-of-day group summary** — opt-in per chat: a daily recap of created and
+  completed tasks posted into the group.
+- **Voice messages** — transcribed via an optional Whisper endpoint
+  (`TRANSCRIBE_URL`); without it they're skipped.
+- **Mini App** — a Telegram WebApp (menu button, `WEBAPP_URL`) with per-chat and
+  global settings: project/section binding, aliases, prompts and filter rules,
+  model/effort, control toggles, topic routes, daily summary, plus a
+  Telegram-style transcript page with deep links from each task to its source
+  messages.
 
 ## Stack
 
 Python 3.12 · aiogram 3.x · MongoDB (Motor) · APScheduler · Anthropic SDK
-(`claude-opus-4-8`, structured output + prompt caching) · OpenAI SDK pointed at
-local Ollama (Qwen triage) · MCP client to the Railway `ticktick-mcp` server.
+(`claude-opus-4-8`, structured output + prompt caching + adaptive thinking) —
+or an HTTP `claude -p` shim · OpenAI SDK pointed at Ollama (Qwen triage +
+embeddings, both optional) · MCP client to your `ticktick-mcp` server · aiohttp
+web server (Mini App + transcript pages) · AES-256-GCM credential vault.
 
 ## Setup
 
@@ -93,12 +120,15 @@ cp .env.example .env   # fill in the values
 
 ### TickTick MCP
 
-`TICKTICK_MCP_URL` is the full Streamable-HTTP URL of **your own**
-`ticktick-mcp` deployment (see [step 1 above](#1-your-own-ticktick-mcp-required-first)),
-**including the secret path**: `https://<app>.up.railway.app/mcp/<MCP_SECRET>`.
-The TickTick OAuth tokens live in *that* instance, so it must be one you deployed
-and control — never a URL someone shared with you. Tools used: `get_projects`,
-`create_task`, `complete_task`.
+Connect it from inside the bot: DM
+`/connect https://<app>.up.railway.app/mcp/<MCP_SECRET>` — the full
+Streamable-HTTP URL of **your own** `ticktick-mcp` deployment (see
+[step 1 above](#1-your-own-ticktick-mcp-required-first)), **including the secret
+path**. The URL is stored encrypted in the credential vault (requires
+`TOKEN_ENC_KEY`; the legacy `TICKTICK_MCP_URL` env var still works as a preset
+and is seeded into the vault on first contact). The TickTick OAuth tokens live
+in *that* instance, so it must be one you deployed and control — never a URL
+someone shared with you.
 
 ### Qwen (Ollama, optional)
 
@@ -124,36 +154,53 @@ and the debounced batch scheduler in one process.
 
 ## Bot usage
 
-No notifications — created tasks just appear in TickTick. The bot is a remote for
-binding chats to projects.
+No per-task notifications — created tasks just appear in TickTick (the watchdog
+DMs you only when something breaks, and the opt-in daily summary posts into
+groups).
 
 - `/start` — welcome + reply menu (`🔗 Привязать проект`, `📋 Мои привязки`,
   `❌ Отвязать`).
+- `/connect <url>` — register your own `ticktick-mcp` connector (see above).
 - In a **group**: `/bind` → pick a project inline → binds that group.
 - `/unbind`, `/bindings` also available.
+- `/invite` (owner) + `/setup` — optional invite-gated connector onboarding:
+  hands a friend one-command installers for their own TickTick/Google MCP
+  servers and their own copy of this bot, delivered via self-destruct notes
+  (needs the `ONBOARDING_*` / `NOTES_BASE_URL` env vars).
 
 Binding targets the chat where the command is issued. DM message *capture* works
-without any binding; unbound chats still have their tasks extracted and stored
-locally, and they sync to TickTick once a project is attached.
+without any binding; unbound chats still have their tasks extracted — they go to
+`DEFAULT_PROJECT`/`DEFAULT_PROJECT_ID` (optionally into a
+`DEFAULT_SECTION[_ID]` column), or stay local until TickTick is connected.
 
-Prompt configuration, aliases, and per-chat settings live in the **Mini App**
-(the Telegram menu button, enabled by setting `WEBAPP_URL`).
+Prompt configuration, aliases, topic routes, and all per-chat settings live in
+the **Mini App** (the Telegram menu button, enabled by setting `WEBAPP_URL`).
 
 ## Config
 
-All via env (see `.env.example`): `BOT_TOKEN`, `MONGO_URL`/`MONGO_DB`,
-`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`/`ANTHROPIC_EFFORT`,
-`QWEN_BASE_URL`/`QWEN_MODEL`, `TICKTICK_MCP_URL`, `DEFAULT_TIMEZONE`, and the
-pipeline knobs `BATCH_INTERVAL_MIN=2` (+ `QUIET_MINUTES`/`MAX_DIRTY_MINUTES`
-debounce), `CONV_GAP_HOURS=6`, `MAX_LOOKBACK_HOURS=48`, `RAW_TTL_DAYS=30`,
-`DEFAULT_PROJECT=Inbox`. Optional retrieval memory: `EMBED_MODEL` (empty
-disables), `RETRIEVE_TOP_K`, `RETRIEVE_MIN_SCORE`.
+All via env, fully documented in [`.env.example`](.env.example) (it matches
+`app/config.py` 1:1). Required core: `BOT_TOKEN`, `MONGO_URL`/`MONGO_DB`,
+`ANTHROPIC_API_KEY` (or the `CLAUDE_CLI_*` shim), `TOKEN_ENC_KEY`,
+`DEFAULT_TIMEZONE`, `WEBAPP_URL`. Everything else is optional with sane
+defaults: extraction (`ANTHROPIC_MODEL`/`ANTHROPIC_EFFORT`,
+`EXTRACT_MODEL`/`EXTRACT_EFFORT`, `SYSTEM_PROMPT`), «Контроль» (`CONTROL_*`),
+semantic dedup (`DEDUP_*`), Qwen triage (`QWEN_*`), retrieval memory
+(`EMBED_MODEL`, `RETRIEVE_*`), voice (`TRANSCRIBE_URL`), watchdog
+(`HEALTHCHECK_*`), group summaries (`DAILY_SUMMARY`/`SUMMARY_HOUR`), pipeline
+knobs (`BATCH_INTERVAL_MIN`, `QUIET_MINUTES`/`MAX_DIRTY_MINUTES`,
+`CONV_GAP_HOURS`, `MAX_LOOKBACK_HOURS`, `RAW_TTL_DAYS=90`),
+default destination (`DEFAULT_PROJECT[_ID]`, `DEFAULT_SECTION[_ID]`), and
+onboarding (`ONBOARDING_*`, `NOTES_BASE_URL`).
 
 ## Data model (MongoDB)
 
-`raw_messages` (TTL 30d on `date`) · `tasks` (permanent, unique `dedupHash`) ·
-`chat_project_map` · `chat_state` (processing cursor) · `chat_summary`
-(permanent long-term memory) · `bot_state` (owner id / business connection).
+`raw_messages` (TTL 90d on `date`) · `tasks` (permanent, unique `dedupHash`) ·
+`chat_project_map` · `chat_state` (processing cursor, per-chat owner) ·
+`chat_summary` (permanent long-term memory) · `chat_settings` (per-chat +
+`__global__` overrides: prompts, routes, control, model…) · `bot_state`
+(owner id / business connection) · `business_connections` ·
+`user_credentials` (encrypted vault) · `message_vectors` / `task_vectors`
+(embeddings for retrieval + semantic dedup).
 
 ## Tests
 

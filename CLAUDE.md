@@ -12,7 +12,8 @@ Pipeline: capture every update → Mongo → on a debounce build a "conversation
 window" per dirty chat → Qwen triage (optional, Ollama) → Claude extraction
 (`claude-opus-4-8`, structured output) → dedup → TickTick via MCP. Long-term
 memory (`chat_summary` + open tasks) is separate from the window and survives
-the 30-day raw TTL. Full spec: the original ТЗ (self-contained).
+the 90-day raw TTL. Full spec: the original ТЗ (self-contained); the detailed
+feature catalog is `docs/FEATURES.md`.
 
 ## Layout
 
@@ -34,31 +35,44 @@ the 30-day raw TTL. Full spec: the original ТЗ (self-contained).
   create_task / complete_task).
 - `tests/` — pure-logic tests (windows, deadline formatting).
 
-## Status (as of handoff)
+## Status
 
-Done & verified:
-- Full implementation written, committed, pushed.
-- Compiles, imports cleanly in a venv, 8 unit tests pass.
-- Anthropic SDK accepts `output_config`/`thinking`; aiogram dispatcher requests
-  `business_*` updates; Railway CLI command syntax verified.
-- Telegram side: BotFather "Secretary Mode" (the renamed Business Mode) enabled,
-  Group Privacy off, bot connected via Telegram Business (Manage Messages 5/5).
+Live and verified in production (Railway, auto-deploy from `main`):
+- Deployed and processing the owner's real chats end-to-end: DM/group capture →
+  debounced batch → extraction → TickTick. MongoDB via the Railway plugin.
+- TickTick MCP live-verified and hardened: parser matches the real server
+  output; identity guards armed (task title on complete, `automation_key` on
+  direct create); silent-failure bugs from the MCP audit fixed.
+- Semantic dedup shipped (three-band cosine + gray-zone LLM judge; uncertainty
+  always creates, never drops) with candidates from all routed destinations.
+- Topic routing shipped: one chat's tasks can fan out into several projects via
+  a per-chat route map; unlabelled tasks fall back to the chat binding.
+- Mini App shipped: per-chat/global settings cabinet (prompts, model/effort,
+  control, routes, daily summary, project/section picker with inline create),
+  Telegram-style transcript page with task deep links.
+- «Контроль» attribution, extraction watchdog (DMs the owner on chain
+  breakage), opt-in end-of-day group summaries, voice transcription hook.
+- Per-user encrypted credential vault (`TOKEN_ENC_KEY`) + `/connect` self-serve
+  TickTick hookup; multi-tenant machinery present but locked to owner-only
+  (`MULTI_TENANT_ENABLED=false` — do not flip without explicit instruction).
+- Onboarding: invite-gated `/setup` connector installers + `scripts/setup.sh`
+  self-deploy of the bot itself; fork auto-sync workflow for deployers.
+- Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
 
-NOT done yet:
-- Never run against live infra. No deploy yet.
-- **TickTick MCP output parser is unverified against the live server** — first
-  thing to check (tool names + exact string format vs `mcp_client.py` parser).
-- Railway deploy pending (see runbook below).
-- Qwen connectivity from cloud unresolved (see gotchas).
+Known loose ends:
+- Qwen/embeddings depend on an external Ollama endpoint (`QWEN_BASE_URL`); when
+  unreachable, triage fails open to Claude and semantic dedup degrades to the
+  exact-title hash — by design, but costlier.
+- `scripts/setup.sh` does not set `TOKEN_ENC_KEY` for the new deployer — it must
+  be added manually before `/connect` works (documented in DEPLOY.md).
+- Docs (`README.md`, `DEPLOY.md`, `.env.example`) refreshed 2026-07-22 to match
+  `app/config.py`; keep them in sync when adding settings.
 
 ## Next steps
 
-1. Verify TickTick MCP live: call `get_projects` / `create_task`, confirm the
-   parser in `app/ticktick/mcp_client.py` matches real output.
-2. Deploy to Railway (CLI runbook below).
-3. Stand up MongoDB (Railway plugin) + set env vars.
-4. Resolve Qwen reachability (tunnel) or rely on fail-open to Claude for now.
-5. End-to-end test: send a DM task → confirm it lands in TickTick within 30 min.
+No fixed roadmap — pick up from the task list / Maksim's requests. When adding
+env settings, update `.env.example` (kept 1:1 with `app/config.py`) and, if
+deployer-facing, `DEPLOY.md`.
 
 ## Railway CLI runbook (verified, CLI 5.20.0)
 
