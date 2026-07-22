@@ -356,6 +356,7 @@ def _local_candidate(task: dict[str, Any], embedding: list[float]) -> dict[str, 
         "embedding": embedding,
         "chatId": task.get("chatId"),
         "details": task.get("details"),
+        "deadline": task.get("deadline"),
         "dedupHash": task.get("dedupHash"),
         "ticktickTaskId": task.get("ticktickTaskId"),
         "projectId": task.get("projectId"),
@@ -371,6 +372,8 @@ def _project_candidate(
         "embedding": embedding,
         "chatId": None,
         "details": None,
+        # Rich cards from get_project_tasks carry "due" when a due date is set.
+        "due": task.get("due"),
         "dedupHash": None,
         "ticktickTaskId": task.get("id"),
         "projectId": project_id,
@@ -468,6 +471,20 @@ async def _build_semantic_dedup(
     return candidates, title_vecs
 
 
+def _should_transfer_deadline(new_task: dict[str, Any], match: dict[str, Any]) -> bool:
+    """True when the NEW (duplicate) task carries a deadline and the matched
+    EXISTING task has none recorded — neither a TickTick due date ("due" on
+    rich project cards) nor a local deadline ("deadline" on local candidates).
+    Enrich-only: an existing deadline is NEVER overwritten."""
+    if not str(new_task.get("deadline") or "").strip():
+        return False
+    if str(match.get("due") or "").strip():
+        return False
+    if str(match.get("deadline") or "").strip():
+        return False
+    return True
+
+
 async def _enrich_duplicate(
     chat_id: str,
     match: dict[str, Any],
@@ -477,28 +494,70 @@ async def _enrich_duplicate(
     """Best-effort enrichment of the existing task a new one duplicates. Appends
     only genuinely-new detail: to the local Mongo doc (when the match is a local
     task) and, if the task lives in TickTick, as a comment (append-only, so no
-    overwrite risk). Never raises — a failed enrich still means we skipped the
+    overwrite risk). Also transfers the new task's deadline onto the existing
+    task when it has none — a duplicate mention that finally names a date must
+    not be lost. Never raises — a failed enrich still means we skipped the
     duplicate, which is the primary goal."""
-    extra = sd.merge_details(match.get("details"), new_task.get("details"))
-    if not extra:
-        return
-    if match.get("dedupHash") and match.get("chatId"):
-        try:
-            await repo.append_task_details(match["chatId"], match["dedupHash"], extra)
-        except Exception:  # noqa: BLE001
-            logger.exception("Chat %s: local task enrich failed", chat_id)
     tt_id = match.get("ticktickTaskId")
     project_id = match.get("projectId")
-    if tt is not None and tt_id and project_id:
+
+    extra = sd.merge_details(match.get("details"), new_task.get("details"))
+    if extra:
+        if match.get("dedupHash") and match.get("chatId"):
+            try:
+                await repo.append_task_details(match["chatId"], match["dedupHash"], extra)
+            except Exception:  # noqa: BLE001
+                logger.exception("Chat %s: local task enrich failed", chat_id)
+        if tt is not None and tt_id and project_id:
+            try:
+                await tt.add_task_comment(
+                    project_id, tt_id, extra, task_title=match.get("title") or ""
+                )
+            except Exception:  # noqa: BLE001 — enrich comment is best-effort
+                logger.debug(
+                    "Chat %s: TickTick enrich comment failed (best-effort)",
+                    chat_id, exc_info=True,
+                )
+
+    # DEADLINE TRANSFER: the duplicate carries a deadline the existing task
+    # lacks → copy it over (best-effort; an existing due date always wins).
+    if not _should_transfer_deadline(new_task, match):
+        return
+    deadline = str(new_task.get("deadline") or "").strip()
+    due = to_ticktick_due(
+        deadline, new_task.get("deadline_tz"), get_settings().default_timezone
+    )
+    if tt is not None and tt_id and project_id and due:
         try:
-            await tt.add_task_comment(
-                project_id, tt_id, extra, task_title=match.get("title") or ""
+            await tt.update_task(
+                project_id,
+                tt_id,
+                title=match.get("title") or "",
+                due_date=due,
+                is_all_day=is_all_day_deadline(deadline),
             )
-        except Exception:  # noqa: BLE001 — enrich comment is best-effort
+            logger.info(
+                "Chat %s: перенёс дедлайн %s на существующую задачу %r",
+                chat_id, deadline, match.get("title"),
+            )
+        except Exception:  # noqa: BLE001 — deadline transfer is best-effort
             logger.debug(
-                "Chat %s: TickTick enrich comment failed (best-effort)",
+                "Chat %s: TickTick deadline transfer failed (best-effort)",
                 chat_id, exc_info=True,
             )
+    if match.get("dedupHash") and match.get("chatId"):
+        try:
+            await repo.set_task_deadline_if_missing(
+                match["chatId"], match["dedupHash"], deadline
+            )
+        except Exception:  # noqa: BLE001 — local mirror is best-effort
+            logger.debug(
+                "Chat %s: local deadline transfer failed (best-effort)",
+                chat_id, exc_info=True,
+            )
+    # Mark the in-memory candidate too, so a second duplicate in this same
+    # batch doesn't try to transfer again.
+    match["deadline"] = deadline
 
 
 async def _create_new_tasks(
@@ -609,7 +668,8 @@ async def _create_new_tasks(
         if matcher is not None and qvec is not None:
             matcher.append({
                 "title": title, "embedding": qvec, "chatId": chat_id,
-                "details": t.get("details"), "dedupHash": dedup,
+                "details": t.get("details"), "deadline": t.get("deadline"),
+                "dedupHash": dedup,
                 "ticktickTaskId": None, "projectId": t_project_id,
             })
             await repo.store_task_vectors(

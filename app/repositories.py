@@ -319,6 +319,27 @@ async def append_task_details(chat_id: str, dedup: str, extra: str) -> bool:
     return True
 
 
+async def set_task_deadline_if_missing(chat_id: str, dedup: str, deadline: str) -> bool:
+    """Set a local task's deadline ONLY if it has none recorded (deadline
+    transfer on semantic dedup — enrich, never overwrite an existing deadline).
+
+    Returns True if the task existed without a deadline and was updated."""
+    db = get_db()
+    res = await db.tasks.update_one(
+        {
+            "chatId": chat_id,
+            "dedupHash": dedup,
+            "$or": [
+                {"deadline": None},
+                {"deadline": ""},
+                {"deadline": {"$exists": False}},
+            ],
+        },
+        {"$set": {"deadline": deadline, "updatedAt": utcnow()}},
+    )
+    return res.modified_count > 0
+
+
 # ---------------------------------------------------------------------------
 # chat_summary (long-term memory)
 # ---------------------------------------------------------------------------

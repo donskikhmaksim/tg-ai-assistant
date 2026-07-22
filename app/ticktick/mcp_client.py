@@ -421,6 +421,37 @@ class TickTickMCP:
             {"summary": "Завершение задачи", "tasks": [task]},
         )
 
+    async def update_task(
+        self,
+        project_id: str,
+        task_id: str,
+        title: str = "",
+        due_date: str | None = None,
+        is_all_day: bool = False,
+    ) -> str:
+        """Update a single existing task via the array-based `update_tasks` tool.
+
+        Currently used for DEADLINE TRANSFER on semantic dedup: when a new
+        extracted task duplicates an existing one that has no due date, the new
+        deadline is copied onto the existing task instead of being lost.
+
+        Pass `title` to arm the server's identity guard (same contract as
+        complete_task): the server cross-checks the id against the live task's
+        title and refuses to touch a different task if a stale id points
+        elsewhere. `due_date` accepts a bare "YYYY-MM-DD" (all-day) or a full
+        ISO timestamp. Returns the raw server text."""
+        task: dict[str, Any] = {"taskId": task_id, "projectId": project_id}
+        if title:
+            task["title"] = title
+        if due_date:
+            task["due_date"] = due_date
+        if is_all_day:
+            task["is_all_day"] = True
+        return await self.call(
+            "update_tasks",
+            {"summary": "Перенос дедлайна на существующую задачу", "tasks": [task]},
+        )
+
 
 _client: TickTickMCP | None = None
 
