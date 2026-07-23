@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.types import MenuButtonWebApp, WebAppInfo
 
 from .audit.poller import run_ticktick_audit_poll
+from .backup.mongo_backup import run_mongo_backup
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
@@ -114,6 +115,24 @@ async def main() -> None:
     logger.info(
         "Daily group summary scheduled: %02d:00 %s (opt-in per chat)",
         settings.summary_hour, settings.default_timezone,
+    )
+
+    # Scheduled Mongo backup to an S3-compatible bucket (Cloudflare R2
+    # recommended). Fail-open / disabled by default: run_mongo_backup no-ops
+    # (logged once) unless BACKUP_S3_* is fully configured — never required
+    # for a fresh deploy. See app/backup/mongo_backup.py.
+    scheduler.add_job(
+        run_mongo_backup,
+        "cron",
+        hour=settings.backup_hour,
+        timezone=settings.default_timezone,
+        id="mongo_backup",
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info(
+        "Mongo backup scheduled: %02d:00 %s (no-op unless BACKUP_S3_* is configured)",
+        settings.backup_hour, settings.default_timezone,
     )
 
     # Phase-2 Mini App: HTTP server alongside polling (binds Railway's $PORT).
