@@ -1,8 +1,22 @@
 from app.pipeline.dedup import is_all_day_deadline, to_ticktick_due
 
 
-def test_date_becomes_iso_timestamp():
-    assert to_ticktick_due("2026-06-28") == "2026-06-28T00:00:00+0000"
+def test_date_passes_through_verbatim():
+    # An all-day deadline is a zone-independent calendar date: the literal
+    # YYYY-MM-DD flows through with no offset attached (#36).
+    assert to_ticktick_due("2026-06-28") == "2026-06-28"
+
+
+def test_date_is_zone_independent():
+    # The bare-date result must NOT depend on default_tz or a named zone — no
+    # offset of any sign can shift the calendar day.
+    for default_tz in ("UTC", "America/Los_Angeles", "Europe/Moscow"):
+        assert to_ticktick_due("2026-06-28", default_tz=default_tz) == "2026-06-28"
+        assert to_ticktick_due("2026-06-28", "Europe/Moscow", default_tz) == "2026-06-28"
+
+
+def test_invalid_bare_date_dropped():
+    assert to_ticktick_due("2026-13-40") is None
 
 
 def test_none_passthrough():

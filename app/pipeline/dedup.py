@@ -33,27 +33,32 @@ def to_ticktick_due(
     tz: str | None = None,
     default_tz: str = DEFAULT_TIMEZONE,
 ) -> str | None:
-    """Format Claude's deadline into a TickTick ISO due string — ALWAYS in the
-    owner's home zone (`default_tz`, e.g. America/Los_Angeles). NEVER UTC.
+    """Format Claude's deadline into a TickTick due string.
 
-    Bulletproof by construction: whatever Claude emits, the result is normalized
-    so TickTick shows the correct LOCAL day and time.
-      - bare date (YYYY-MM-DD)  -> LOCAL midnight in the owner's zone (all-day).
+      - bare date (YYYY-MM-DD)  -> the LITERAL date, passed through unchanged. An
+        all-day deadline is a ZONE-INDEPENDENT calendar date (the caller sets the
+        all-day flag alongside); attaching any offset only shows the right day
+        while three zones (this default_tz, ticktick-mcp's USER_TIMEZONE, and the
+        TickTick account zone) stay equal, and shifts −1 the moment they diverge
+        (#36). Never bake a home-zone or UTC midnight into it.
       - wall-clock (…Thh:mm)    -> read in `tz` if the conversation named a zone,
         else the owner's zone; then normalized to the owner's zone.
       - offset-carrying / other -> parsed and CONVERTED (same instant) to the
         owner's zone — so a stray UTC/offset can never leak through.
+
+    Only TIMED deadlines carry a timezone; all-day dates never do.
     """
     if not deadline:
         return None
     d = deadline.strip()
     home = _zone(default_tz) or timezone.utc
     if _DATE_RE.match(d):
+        # Validate it's a real calendar date, then emit it verbatim (all-day).
         try:
-            dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=home)
+            datetime.strptime(d, "%Y-%m-%d")
         except ValueError:
             return None
-        return dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+        return d
     if _LOCAL_DT_RE.match(d):
         d2 = d.replace(" ", "T")
         if d2.count(":") == 1:
