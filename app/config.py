@@ -207,6 +207,31 @@ class Settings(BaseSettings):
     # in Telegram). Empty → the button says it's not configured.
     google_dashboard_add_url: str = ""
 
+    # Mini App onboarding screen (`/onboarding`) — a friendlier walkthrough for a
+    # stranger who wants their OWN instance, plus an "Ask AI" Q&A box for when
+    # the setup process breaks. Its POST /api/onboarding/ask is deliberately NOT
+    # gated by owner auth (the whole point is to help someone BEFORE they have
+    # anything of their own to authenticate with), so it is the one endpoint in
+    # app/web/server.py that needs its own abuse mitigations instead of relying
+    # on _require_owner. See app/onboarding/ai_help.py for the system prompt and
+    # app/web/server.py::api_onboarding_ask for the request-level guards.
+    onboarding_ai_help_enabled: bool = True
+    # Model alias for the helper (opus|sonnet|haiku — same aliases as
+    # EXTRACT_MODEL/resolve_api_model). Deliberately cheap by default: the
+    # answers only need the baked-in onboarding docs, not deep reasoning.
+    onboarding_ai_model: str = "haiku"
+    # Hard cap (characters) on a single question and on each stored history
+    # turn — the request-size half of the abuse mitigation (the other half is
+    # the rate limit below). Keeps this from being usable as a free-form long-
+    # context proxy to the owner's Claude account.
+    onboarding_ai_max_message_chars: int = 500
+    # Sliding-window rate limit: at most this many questions per session-id (or
+    # IP, if the client didn't send one) per hour. In-memory / per-process —
+    # resets on redeploy or restart, and doesn't share state across replicas.
+    # That's fine for a lightweight, single-instance anti-abuse gate; it is NOT
+    # a distributed rate limiter.
+    onboarding_ai_rate_limit_per_hour: int = 20
+
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app
     # Railway injects PORT; the aiohttp server binds it. WEBAPP_URL drives the

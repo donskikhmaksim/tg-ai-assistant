@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Заведи своего Большого Брата</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #18191c);
+      --text: var(--tg-theme-text-color, #e8e8ea);
+      --hint: var(--tg-theme-hint-color, #8a8f98);
+      --card: var(--tg-theme-secondary-bg-color, #232428);
+      --accent: var(--tg-theme-button-color, #2ea6ff);
+      --accent-text: var(--tg-theme-button-text-color, #fff);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      padding: 14px 14px 40px;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+    }
+    h1 { font-size: 19px; margin-bottom: 6px; }
+    .lede { color: var(--hint); font-size: 14px; margin-bottom: 18px; }
+
+    .step { background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+    .step-title { font-weight: 700; font-size: 15px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .step-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; border-radius: 50%; background: var(--accent);
+      color: var(--accent-text); font-size: 12px; font-weight: 700; flex-shrink: 0;
+    }
+    .step p { color: var(--hint); font-size: 13px; margin: 6px 0; line-height: 1.5; }
+
+    .btn {
+      display: block; width: 100%; padding: 12px; border: none; border-radius: 11px;
+      background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600;
+      cursor: pointer; text-align: center; text-decoration: none; margin-top: 8px;
+    }
+    .btn.secondary { background: var(--bg); color: var(--text); }
+    .btn:active { opacity: .8; }
+
+    .cmd-box {
+      position: relative; background: var(--bg); border-radius: 10px; padding: 10px 40px 10px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-all; margin-top: 8px;
+    }
+    .copy-btn {
+      position: absolute; top: 8px; right: 8px; border: none; background: var(--card);
+      color: var(--text); border-radius: 7px; padding: 5px 7px; font-size: 13px; cursor: pointer;
+    }
+
+    details.more { margin-top: 10px; }
+    details.more summary {
+      color: var(--accent); font-size: 13px; cursor: pointer; list-style: none;
+    }
+    details.more summary::-webkit-details-marker { display: none; }
+    details.more summary::before { content: "▸ "; }
+    details.more[open] summary::before { content: "▾ "; }
+
+    .check-row { display: flex; gap: 8px; margin-top: 8px; }
+    .check-row input {
+      flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid transparent;
+      background: var(--bg); color: var(--text); font-size: 14px;
+    }
+    .check-row input:focus { outline: none; border-color: var(--accent); }
+    .check-row button {
+      flex-shrink: 0; padding: 0 16px; border: none; border-radius: 10px;
+      background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .check-result { margin-top: 8px; font-size: 13px; min-height: 18px; }
+    .check-result.ok { color: #4caf7d; }
+    .check-result.err { color: #e05a5a; }
+
+    /* Ask AI */
+    .chat-log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; max-height: 360px; overflow-y: auto; }
+    .bubble { border-radius: 12px; padding: 9px 12px; font-size: 14px; line-height: 1.45; max-width: 92%; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .bubble.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
+    .bubble.assistant { align-self: flex-start; background: var(--bg); }
+    .bubble.pending { align-self: flex-start; background: var(--bg); color: var(--hint); font-style: italic; }
+    .ask-row { display: flex; gap: 8px; align-items: flex-end; }
+    .ask-row textarea {
+      flex: 1; min-width: 0; padding: 10px 12px; border-radius: 12px; border: 1px solid transparent;
+      background: var(--bg); color: var(--text); font-size: 14px; font-family: inherit;
+      resize: none; max-height: 120px; line-height: 1.4;
+    }
+    .ask-row textarea:focus { outline: none; border-color: var(--accent); }
+    .ask-row button {
+      flex-shrink: 0; padding: 10px 14px; border: none; border-radius: 12px;
+      background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .ask-row button:disabled { opacity: .5; cursor: default; }
+    .char-count { color: var(--hint); font-size: 11px; text-align: right; margin-top: 3px; }
+
+    .empty-note { color: var(--hint); font-size: 13px; text-align: center; padding: 6px 0; }
+  </style>
+</head>
+<body>
+
+<h1>👁 Заведи своего Большого Брата</h1>
+<p class="lede">
+  Бот читает твои переписки в Telegram и сам раскладывает договорённости по
+  TickTick. Разворачивается ПОЛНОСТЬЮ у тебя: свой бот, своя база, свой
+  TickTick — автор оригинала ничего не видит.
+</p>
+
+<div class="step">
+  <div class="step-title"><span class="step-num">1</span> Разверни свой экземпляр</div>
+  <p>Выбери один из способов ниже. Оба разворачивают одно и то же — просто разные пути.</p>
+  <a class="btn" id="railwayBtn" href="#" style="display:none">🚀 Развернуть на Railway (один клик)</a>
+  <a class="btn secondary" id="repoBtn" href="#" style="display:none">📦 Репозиторий и инструкция (DEPLOY.md)</a>
+
+  <details class="more" id="cliDetails" style="display:none">
+    <summary>Или — команда для терминала</summary>
+    <p>Вставь в Терминал (Mac: <b>Cmd+Space → Terminal</b>; Windows: WSL или Git Bash).
+       Подставь свои значения вместо плейсхолдеров — токен бота из @BotFather и свой Anthropic API ключ.</p>
+    <div class="cmd-box"><span id="cliCmd"></span><button class="copy-btn" id="cliCopy">⧉</button></div>
+    <p>Скрипт сам поставит Railway CLI, залогинит и всё развернёт — дальше следуй подсказкам в терминале.</p>
+  </details>
+
+  <details class="more" id="n8nDetails" style="display:none">
+    <summary>Опционально — свой n8n (автоматизация)</summary>
+    <p>Отдельный сервис для дополнительных автоматизаций (например почтовый пайплайн). Не обязателен для самого бота.</p>
+    <div class="cmd-box"><span id="n8nCmd"></span><button class="copy-btn" id="n8nCopy">⧉</button></div>
+  </details>
+</div>
+
+<div class="step">
+  <div class="step-title"><span class="step-num">2</span> Настрой Telegram и TickTick</div>
+  <p>В @BotFather у своего бота включи <b>Secretary Mode</b> (бывший Business Mode) и выключи <b>Group Privacy</b>.</p>
+  <p>TickTick — отдельный маленький сервер (<code>ticktick-mcp</code>), который тоже разворачивается у тебя.
+     Когда получишь его адрес вида <code>https://…/mcp/&lt;секрет&gt;</code> — напиши своему боту в личку:</p>
+  <div class="cmd-box" style="padding-right:10px">/connect https://&lt;твой-ticktick-mcp&gt;.up.railway.app/mcp/&lt;секрет&gt;</div>
+</div>
+
+<div class="step">
+  <div class="step-title"><span class="step-num">3</span> Проверь, что бот поднялся</div>
+  <p>Вставь адрес своего задеплоенного сервиса (то, что показал Railway, без <code>/health</code> в конце):</p>
+  <div class="check-row">
+    <input id="healthUrl" type="text" placeholder="https://твой-бот.up.railway.app" autocomplete="off" />
+    <button id="healthBtn">Проверить</button>
+  </div>
+  <div class="check-result" id="healthResult"></div>
+</div>
+
+<div class="step" id="askStep">
+  <div class="step-title">🤖 Спроси ИИ, если что-то не так</div>
+  <p>Опиши проблему своими словами — по-русски или по-английски. Это не поддержка «вживую», а короткая справка по типичным вопросам установки.</p>
+  <div class="chat-log" id="chatLog"></div>
+  <div class="ask-row">
+    <textarea id="askInput" rows="1" placeholder="Например: почему бот не видит группу?"></textarea>
+    <button id="askBtn">➤</button>
+  </div>
+  <div class="char-count" id="charCount"></div>
+</div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  tg?.ready(); tg?.expand();
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g,
+      c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  // A per-tab session id (not persisted across visits on purpose) so the
+  // backend's rate limiter can key on "this visitor" rather than a shared IP.
+  const SESSION_ID = (() => {
+    try {
+      let id = sessionStorage.getItem("onboarding_session");
+      if (!id) {
+        id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        sessionStorage.setItem("onboarding_session", id);
+      }
+      return id;
+    } catch { return Math.random().toString(36).slice(2); }
+  })();
+
+  let MAX_CHARS = 500;
+
+  function buildCliCommand(baseUrl) {
+    return `bash <(curl -fsSL ${baseUrl}) \\\n  --bot-token <ТВОЙ_BOT_TOKEN_ОТ_BOTFATHER> \\\n  --anthropic-key <ТВОЙ_ANTHROPIC_API_KEY>`;
+  }
+
+  function wireCopy(btnId, srcId) {
+    const btn = document.getElementById(btnId);
+    const src = document.getElementById(srcId);
+    if (!btn || !src) return;
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(src.textContent);
+        btn.textContent = "✓";
+        setTimeout(() => (btn.textContent = "⧉"), 1200);
+      } catch {
+        tg?.showAlert ? tg.showAlert("Не удалось скопировать — выдели текст вручную.") : alert("Скопируй вручную");
+      }
+    });
+  }
+
+  async function loadConfig() {
+    try {
+      const res = await fetch("/api/onboarding/config");
+      const cfg = await res.json();
+
+      if (cfg.railwayTemplateUrl) {
+        const b = document.getElementById("railwayBtn");
+        b.href = cfg.railwayTemplateUrl; b.style.display = "block";
+      }
+      if (cfg.repoUrl) {
+        const b = document.getElementById("repoBtn");
+        b.href = cfg.repoUrl; b.style.display = "block";
+      }
+      if (cfg.assistantSetupUrl) {
+        document.getElementById("cliCmd").textContent = buildCliCommand(cfg.assistantSetupUrl);
+        document.getElementById("cliDetails").style.display = "block";
+        wireCopy("cliCopy", "cliCmd");
+      }
+      if (cfg.n8nSetupUrl) {
+        document.getElementById("n8nCmd").textContent = `bash <(curl -fsSL ${cfg.n8nSetupUrl})`;
+        document.getElementById("n8nDetails").style.display = "block";
+        wireCopy("n8nCopy", "n8nCmd");
+      }
+      if (typeof cfg.maxMessageChars === "number" && cfg.maxMessageChars > 0) {
+        MAX_CHARS = cfg.maxMessageChars;
+      }
+      if (!cfg.aiHelpEnabled) {
+        document.getElementById("askStep").innerHTML =
+          '<div class="empty-note">Помощник «Спроси ИИ» сейчас выключен владельцем. ' +
+          'Инструкция выше и DEPLOY.md по-прежнему актуальны.</div>';
+      }
+      updateCharCount();
+    } catch (e) {
+      console.warn("onboarding config load failed", e);
+    }
+  }
+
+  // ── health check (client-side fetch straight to the deployer's own domain —
+  // no backend proxy, so this can never be turned into an SSRF vector) ──────
+  document.getElementById("healthBtn").addEventListener("click", async () => {
+    const input = document.getElementById("healthUrl");
+    const result = document.getElementById("healthResult");
+    let url = input.value.trim();
+    if (!url) { result.textContent = "Вставь адрес своего сервиса."; result.className = "check-result err"; return; }
+    if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+    url = url.replace(/\/+$/, "");
+    result.textContent = "Проверяю…"; result.className = "check-result";
+    try {
+      const res = await fetch(url + "/health", { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (data && data.ok) {
+        result.textContent = "✅ Бот отвечает и работает.";
+        result.className = "check-result ok";
+      } else {
+        throw new Error("unexpected response");
+      }
+    } catch (e) {
+      result.textContent = "⚠️ Не отвечает (пока разворачивается, или адрес неверный). Подожди пару минут и попробуй ещё раз.";
+      result.className = "check-result err";
+    }
+  });
+
+  // ── Ask AI ─────────────────────────────────────────────────────────────────
+  const history = []; // [{role:"user"|"assistant", text}]
+  const log = document.getElementById("chatLog");
+  const input = document.getElementById("askInput");
+  const askBtn = document.getElementById("askBtn");
+  const charCount = document.getElementById("charCount");
+
+  function addBubble(role, text) {
+    const el = document.createElement("div");
+    el.className = "bubble " + role;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function updateCharCount() {
+    const n = input.value.length;
+    charCount.textContent = `${n} / ${MAX_CHARS}`;
+    charCount.style.color = n > MAX_CHARS ? "#e05a5a" : "";
+  }
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 120) + "px";
+    updateCharCount();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); }
+  });
+  askBtn.addEventListener("click", sendQuestion);
+
+  async function sendQuestion() {
+    const text = input.value.trim();
+    if (!text) return;
+    if (text.length > MAX_CHARS) {
+      addBubble("assistant", `Слишком длинный вопрос (максимум ${MAX_CHARS} символов) — сократи и попробуй снова.`);
+      return;
+    }
+    addBubble("user", text);
+    input.value = ""; input.style.height = "auto"; updateCharCount();
+    askBtn.disabled = true;
+    const pending = addBubble("pending", "Думаю…");
+    try {
+      const res = await fetch("/api/onboarding/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Onboarding-Session": SESSION_ID },
+        body: JSON.stringify({ question: text, history }),
+      });
+      pending.remove();
+      if (res.status === 429) {
+        addBubble("assistant", "Слишком много вопросов подряд — подожди немного и попробуй снова.");
+        return;
+      }
+      if (res.status === 404) {
+        addBubble("assistant", "Помощник сейчас выключен владельцем бота.");
+        return;
+      }
+      if (!res.ok) {
+        addBubble("assistant", "Не смог получить ответ — попробуй ещё раз чуть позже.");
+        return;
+      }
+      const data = await res.json();
+      const reply = data.answer || "Не смог получить ответ — попробуй ещё раз чуть позже.";
+      addBubble("assistant", reply);
+      history.push({ role: "user", text });
+      history.push({ role: "assistant", text: reply });
+      if (history.length > 12) history.splice(0, history.length - 12);
+    } catch (e) {
+      pending.remove();
+      addBubble("assistant", "Не смог связаться с сервером — проверь соединение и попробуй снова.");
+    } finally {
+      askBtn.disabled = false;
+    }
+  }
+
+  loadConfig();
+</script>
+</body>
+</html>

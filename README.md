@@ -92,6 +92,11 @@ Beyond the core pipeline (all optional / configurable):
   model/effort, control toggles, topic routes, daily summary, plus a
   Telegram-style transcript page with deep links from each task to its source
   messages.
+- **Mini App onboarding screen** (`/onboarding`, no owner auth) — a friendlier
+  walkthrough for someone deploying their OWN instance: the Railway/CLI deploy
+  options, a "check my deploy" health probe, and an "Ask AI" Q&A box backed by
+  a system-prompt-only Claude call (condensed onboarding docs, not codebase
+  RAG — see `app/onboarding/ai_help.py`). Toggle with `ONBOARDING_AI_HELP_ENABLED`.
 
 ## Stack
 

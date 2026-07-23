@@ -33,6 +33,9 @@ feature catalog is `docs/FEATURES.md`.
 - `app/ticktick/mcp_client.py` — Streamable-HTTP MCP client to the Railway
   `ticktick-mcp` server (parses formatted string output of get_projects /
   create_task / complete_task).
+- `app/web/server.py` + `app/web/static/app.html` — the owner-only Mini App
+  (settings cabinet); `app/web/static/onboarding.html` + `app/onboarding/
+  ai_help.py` — the pre-auth onboarding screen + "Ask AI" Q&A helper.
 - `tests/` — pure-logic tests (windows, deadline formatting).
 
 ## Status
@@ -61,6 +64,14 @@ Live and verified in production (Railway, auto-deploy from `main`):
   connector installers + `scripts/setup.sh` self-deploy of the bot (now forks
   upstream into the deployer's GitHub and connects the fork); fork auto-sync
   workflow (every ~5 min) for deployers.
+- Mini App onboarding screen (`/onboarding`, `app/web/static/onboarding.html`):
+  a friendlier self-host walkthrough (deploy links/CLI one-liner, a client-side
+  "check my deploy" health probe) plus an "Ask AI" Q&A box — the ONE Mini App
+  route not gated by owner auth (`POST /api/onboarding/ask`), mitigated with a
+  kill switch (`ONBOARDING_AI_HELP_ENABLED`), a message-length cap, and an
+  in-memory per-session/IP rate limit (see `app/web/server.py` and
+  `app/onboarding/ai_help.py`). v1 is system-prompt-only (condensed onboarding
+  docs baked in) — no codebase RAG, by design; a documented deferred enhancement.
 - Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
 
 Known loose ends:

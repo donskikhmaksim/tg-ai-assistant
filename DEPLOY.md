@@ -135,6 +135,12 @@ Everything else is optional and documented inline in
 - `TRANSCRIBE_URL` — a Whisper endpoint for voice/audio messages.
 - `ONBOARDING_*` / `NOTES_BASE_URL` — the `/start` text for non-owners and the
   invite-gated `/setup` connector-onboarding buttons.
+- `ONBOARDING_AI_HELP_ENABLED` (+ `ONBOARDING_AI_MODEL` /
+  `ONBOARDING_AI_MAX_MESSAGE_CHARS` / `ONBOARDING_AI_RATE_LIMIT_PER_HOUR`) —
+  the Mini App's `/onboarding` screen and its "Ask AI" Q&A box (the one route
+  reachable pre-auth; see `app/web/server.py::api_onboarding_ask` for the
+  mitigations). Turn it off if you don't want strangers spending your Claude
+  budget.
 
 Railway injects `PORT` automatically.
 

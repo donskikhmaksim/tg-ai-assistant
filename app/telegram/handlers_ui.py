@@ -748,6 +748,15 @@ async def cmd_start(
         "Твои переписки остаются только у тебя — я их не вижу.\n",
     ]
     buttons: list[list[InlineKeyboardButton]] = []
+    # Primary entry: the Mini App onboarding screen (nicer walkthrough + the
+    # "Ask AI" box for when something breaks). Falls back to the plain
+    # Railway/repo links below regardless (older Telegram clients, or WEBAPP_URL
+    # unset), so nothing regresses if the Mini App can't be opened.
+    if s.webapp_url:
+        buttons.append([InlineKeyboardButton(
+            text="🚀 Открыть онбординг",
+            web_app=WebAppInfo(url=s.webapp_url.rstrip("/") + "/onboarding"),
+        )])
     if s.onboarding_railway_template_url:
         buttons.append([InlineKeyboardButton(
             text="🚀 Развернуть на Railway", url=s.onboarding_railway_template_url)])
@@ -762,7 +771,7 @@ async def cmd_start(
         )
         prompt = _deploy_prompt(s.onboarding_repo_url)
         lines.append(f"```\n{prompt}\n```")
-    else:
+    elif not s.webapp_url:
         lines.append("Онбординг пока не настроен владельцем — напиши ему напрямую.")
 
     await message.answer(
