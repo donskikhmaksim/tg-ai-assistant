@@ -225,12 +225,21 @@ class Settings(BaseSettings):
     # the rate limit below). Keeps this from being usable as a free-form long-
     # context proxy to the owner's Claude account.
     onboarding_ai_max_message_chars: int = 500
-    # Sliding-window rate limit: at most this many questions per session-id (or
-    # IP, if the client didn't send one) per hour. In-memory / per-process —
-    # resets on redeploy or restart, and doesn't share state across replicas.
-    # That's fine for a lightweight, single-instance anti-abuse gate; it is NOT
-    # a distributed rate limiter.
+    # Sliding-window rate limit: at most this many questions per real peer IP
+    # (`request.remote`) per hour. In-memory / per-process — resets on
+    # redeploy or restart, and doesn't share state across replicas. That's
+    # fine for a lightweight, single-instance anti-abuse gate; it is NOT a
+    # distributed rate limiter. Deliberately NOT keyed on the client-supplied
+    # `X-Onboarding-Session` header — see app/web/server.py::
+    # _onboarding_rate_limit_key for why (fixed bypass: a rotated header
+    # trivially defeated a header-keyed limiter).
     onboarding_ai_rate_limit_per_hour: int = 20
+    # Hard backstop, independent of per-IP keying: total questions answered
+    # across ALL callers combined per rolling hour. Protects the owner's
+    # Anthropic spend even if per-IP keying were somehow defeated by many
+    # distinct real callers (e.g. a botnet), where no single IP would trip
+    # its own per-IP cap.
+    onboarding_ai_global_hourly_cap: int = 100
 
     # Web / Mini App (Phase 2)
     # Public https origin of this service, e.g. https://tg-ai-assistant-production.up.railway.app

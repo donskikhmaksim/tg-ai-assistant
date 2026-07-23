@@ -68,10 +68,14 @@ Live and verified in production (Railway, auto-deploy from `main`):
   a friendlier self-host walkthrough (deploy links/CLI one-liner, a client-side
   "check my deploy" health probe) plus an "Ask AI" Q&A box — the ONE Mini App
   route not gated by owner auth (`POST /api/onboarding/ask`), mitigated with a
-  kill switch (`ONBOARDING_AI_HELP_ENABLED`), a message-length cap, and an
-  in-memory per-session/IP rate limit (see `app/web/server.py` and
-  `app/onboarding/ai_help.py`). v1 is system-prompt-only (condensed onboarding
-  docs baked in) — no codebase RAG, by design; a documented deferred enhancement.
+  kill switch (`ONBOARDING_AI_HELP_ENABLED`), a message-length cap, an
+  in-memory per-IP rate limit keyed on the real peer address (`request.remote`
+  — NOT the client-supplied `X-Onboarding-Session` header, after an
+  adversarial review found that header trivially bypassable), and a hard
+  aggregate cap across all callers (`ONBOARDING_AI_GLOBAL_HOURLY_CAP`) as a
+  botnet backstop (see `app/web/server.py` and `app/onboarding/ai_help.py`).
+  v1 is system-prompt-only (condensed onboarding docs baked in) — no codebase
+  RAG, by design; a documented deferred enhancement.
 - Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
 
 Known loose ends:
