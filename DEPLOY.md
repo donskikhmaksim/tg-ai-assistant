@@ -135,6 +135,8 @@ Everything else is optional and documented inline in
 - `TRANSCRIBE_URL` — a Whisper endpoint for voice/audio messages.
 - `ONBOARDING_*` / `NOTES_BASE_URL` — the `/start` text for non-owners and the
   invite-gated `/setup` connector-onboarding buttons.
+- `BACKUP_S3_*` — optional daily `mongodump` → S3-compatible bucket (Cloudflare
+  R2 recommended); see [Optional: scheduled Mongo backups](#optional-scheduled-mongo-backups).
 
 Railway injects `PORT` automatically.
 
@@ -228,6 +230,46 @@ Notes:
   public https origin you serve it behind (a reverse proxy with TLS).
 - If you don't run Ollama, leave `QWEN_BASE_URL` unset — triage fails open to
   Claude.
+
+---
+
+## Optional: scheduled Mongo backups
+
+The bot can run a daily `mongodump --archive --gzip` and upload the archive to
+an S3-compatible bucket — **Cloudflare R2** is recommended: its free tier
+(10GB storage, no egress fees) comfortably covers this instance's database.
+Create an R2 bucket in the Cloudflare dashboard, then **R2 → Manage API
+tokens** to generate an access key + secret scoped to that bucket; the account
+ID in your R2 dashboard URL gives you the endpoint,
+`https://<accountid>.r2.cloudflarestorage.com`.
+
+It's entirely **optional and OFF by default** — set these four vars to enable
+it (see `.env.example` for the rest: region, key prefix, hour, retention):
+
+```
+BACKUP_S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+BACKUP_S3_BUCKET=<your-bucket-name>
+BACKUP_S3_ACCESS_KEY=<r2-access-key-id>
+BACKUP_S3_SECRET_KEY=<r2-secret-access-key>
+```
+
+Leave any of them unset and the job no-ops on schedule (logged once) — it
+never blocks a fresh deploy. The container image needs `mongodb-database-tools`
+(bundled in the provided [`Dockerfile`](Dockerfile)) for `mongodump` to run.
+
+**Restore** (e.g. onto a fresh MongoDB instance, or to recover from a mistake):
+
+```bash
+# download the archive you want from your bucket first (R2 dashboard, or any
+# S3-compatible client/CLI pointed at BACKUP_S3_ENDPOINT), then:
+mongorestore --uri="$MONGO_URL" --archive=<downloaded-file>.archive.gz --gzip
+```
+
+No encrypted vault is involved: the single-tenant conversion removed the
+per-user credential vault, and the current schema stores no
+`TOKEN_ENC_KEY`-encrypted collections (the TickTick connector URL lives in
+`TICKTICK_MCP_URL` / `bot_state`, in plain text, not encrypted in Mongo) — so a
+restored dump works immediately with no matching key required.
 
 ---
 

@@ -246,6 +246,23 @@ class Settings(BaseSettings):
     # TickTick poller only; Google pollers land in a later phase.
     audit_poll_interval_seconds: int = 300
 
+    # ─── Scheduled Mongo backup (optional, OFF by default) ──────────────
+    # A daily `mongodump --archive --gzip` uploaded to an S3-compatible bucket
+    # (Cloudflare R2 recommended — free tier covers a personal instance easily;
+    # see DEPLOY.md for setup + the mongorestore procedure). Runs on the shared
+    # scheduler at BACKUP_HOUR (default_timezone). Mirrors the qwen/transcribe
+    # fail-open pattern: if ANY required BACKUP_S3_* var is unset, the job
+    # no-ops on every scheduled check (logged once, not spammed daily) — never
+    # required for a fresh deploy. See app/backup/mongo_backup.py.
+    backup_s3_endpoint: str = ""      # e.g. https://<accountid>.r2.cloudflarestorage.com
+    backup_s3_bucket: str = ""
+    backup_s3_access_key: str = ""
+    backup_s3_secret_key: str = ""
+    backup_s3_region: str = "auto"    # R2 has no regions ("auto"); real AWS S3 needs its region
+    backup_s3_prefix: str = "mongo-backups"  # key prefix under the bucket
+    backup_hour: int = 4              # local hour (default_timezone) the backup runs
+    backup_retention_days: int = 30   # prune objects under the prefix older than this
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600
