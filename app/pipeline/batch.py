@@ -20,8 +20,7 @@ from .. import repositories as repo
 from ..config import get_settings
 from ..embeddings import embed
 from ..llm import claude, qwen
-from ..onboarding.ticktick_resolve import get_user_ticktick
-from ..ticktick.mcp_client import TickTickMCP
+from ..ticktick.mcp_client import TickTickMCP, resolve_ticktick
 from ..web.auth import chat_link_token
 from . import retrieve as retrieval
 from . import semantic_dedup as sd
@@ -153,14 +152,12 @@ async def process_chat(chat_id: str) -> None:
     if new_summary:
         await repo.set_summary(chat_id, new_summary)
 
-    # Multi-tenant: route this chat's tasks to ITS owner's own TickTick. No
-    # shared account — a chat whose owner has no connector keeps tasks local.
-    owner = await repo.resolve_chat_owner(chat_id)
-    tt = await get_user_ticktick(owner)
+    # Single-tenant: one global TickTick account for the whole instance. When no
+    # URL is configured (env or /connect) tasks are kept local until it is set.
+    tt = await resolve_ticktick()
     if tt is None:
         logger.info(
-            "Chat %s: owner %s has no TickTick connector — tasks kept local",
-            chat_id, owner,
+            "Chat %s: no TickTick URL configured — tasks kept local", chat_id
         )
 
     smap = await _resolve_section_map(chat_id)

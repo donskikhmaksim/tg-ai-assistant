@@ -99,7 +99,7 @@ Python 3.12 · aiogram 3.x · MongoDB (Motor) · APScheduler · Anthropic SDK
 (`claude-opus-4-8`, structured output + prompt caching + adaptive thinking) —
 or an HTTP `claude -p` shim · OpenAI SDK pointed at Ollama (Qwen triage +
 embeddings, both optional) · MCP client to your `ticktick-mcp` server · aiohttp
-web server (Mini App + transcript pages) · AES-256-GCM credential vault.
+web server (Mini App + transcript pages).
 
 ## Setup
 
@@ -124,11 +124,11 @@ Connect it from inside the bot: DM
 `/connect https://<app>.up.railway.app/mcp/<MCP_SECRET>` — the full
 Streamable-HTTP URL of **your own** `ticktick-mcp` deployment (see
 [step 1 above](#1-your-own-ticktick-mcp-required-first)), **including the secret
-path**. The URL is stored encrypted in the credential vault (requires
-`TOKEN_ENC_KEY`; the legacy `TICKTICK_MCP_URL` env var still works as a preset
-and is seeded into the vault on first contact). The TickTick OAuth tokens live
-in *that* instance, so it must be one you deployed and control — never a URL
-someone shared with you.
+path**. `/connect` stores it as a runtime override in `bot_state` (owner-only;
+it takes priority over the `TICKTICK_MCP_URL` env var, which you can set instead
+if you prefer). This is the single global TickTick connector for the instance.
+The TickTick OAuth tokens live in *that* `ticktick-mcp`, so it must be one you
+deployed and control — never a URL someone shared with you.
 
 ### Qwen (Ollama, optional)
 
@@ -180,8 +180,8 @@ the **Mini App** (the Telegram menu button, enabled by setting `WEBAPP_URL`).
 
 All via env, fully documented in [`.env.example`](.env.example) (it matches
 `app/config.py` 1:1). Required core: `BOT_TOKEN`, `MONGO_URL`/`MONGO_DB`,
-`ANTHROPIC_API_KEY` (or the `CLAUDE_CLI_*` shim), `TOKEN_ENC_KEY`,
-`DEFAULT_TIMEZONE`, `WEBAPP_URL`. Everything else is optional with sane
+`ANTHROPIC_API_KEY` (or the `CLAUDE_CLI_*` shim), `DEFAULT_TIMEZONE`,
+`WEBAPP_URL` (+ `TICKTICK_MCP_URL`, or set it later via `/connect`). Everything else is optional with sane
 defaults: extraction (`ANTHROPIC_MODEL`/`ANTHROPIC_EFFORT`,
 `EXTRACT_MODEL`/`EXTRACT_EFFORT`, `SYSTEM_PROMPT`), «Контроль» (`CONTROL_*`),
 semantic dedup (`DEDUP_*`), Qwen triage (`QWEN_*`), retrieval memory
@@ -195,11 +195,11 @@ onboarding (`ONBOARDING_*`, `NOTES_BASE_URL`).
 ## Data model (MongoDB)
 
 `raw_messages` (TTL 90d on `date`) · `tasks` (permanent, unique `dedupHash`) ·
-`chat_project_map` · `chat_state` (processing cursor, per-chat owner) ·
+`chat_project_map` · `chat_state` (processing cursor) ·
 `chat_summary` (permanent long-term memory) · `chat_settings` (per-chat +
 `__global__` overrides: prompts, routes, control, model…) · `bot_state`
-(owner id / business connection) · `business_connections` ·
-`user_credentials` (encrypted vault) · `message_vectors` / `task_vectors`
+(owner id / business connection / TickTick URL override) ·
+`message_vectors` / `task_vectors`
 (embeddings for retrieval + semantic dedup).
 
 ## Tests

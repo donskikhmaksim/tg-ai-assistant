@@ -20,7 +20,6 @@ from aiogram.types import (
 
 from .. import repositories as repo
 from ..config import get_settings
-from ..tenancy import is_multi_tenant_allowed
 from ..transcribe import transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -33,40 +32,15 @@ BUSINESS_CONNECTION_KEY = "business_connection_id"
 
 @router.business_connection()
 async def on_business_connection(conn: BusinessConnection) -> None:
-    """Owner connected/updated the bot to their Premium account."""
-    # Single-tenant lock: while multi-tenant is OFF (the default) only the
-    # primary owner is served. If an owner already exists and a DIFFERENT user
-    # connects their Business account, do NOT register them as a new tenant —
-    # the primary owner keeps connecting/updating normally, and a fresh deploy's
-    # first connection still bootstraps the primary owner below.
-    primary = await repo.get_bot_state(OWNER_ID_KEY)
-    if (
-        primary is not None
-        and int(primary) != conn.user.id
-        and not is_multi_tenant_allowed()
-    ):
-        logger.warning(
-            "Ignoring Business connection %s from non-owner %s (single-tenant lock)",
-            conn.id,
-            conn.user.id,
-        )
-        return
-    # Multi-tenant: record this connection -> owner mapping.
-    await repo.set_business_connection(conn.id, conn.user.id, conn.is_enabled)
-    # Back-compat: first/primary owner also lives in bot_state (legacy readers,
-    # group fallback, Mini App bootstrap). We only set it once so a second
-    # tenant connecting doesn't hijack the "primary" owner.
+    """Owner connected/updated the bot to their Premium account.
+
+    Single-tenant: the FIRST user to connect Business becomes the one owner
+    (owner = user #1). We record their id once — a later connection (e.g. the
+    owner re-adding the bot) refreshes the connection id but never changes who
+    the owner is."""
     if await repo.get_bot_state(OWNER_ID_KEY) is None:
         await repo.set_bot_state(OWNER_ID_KEY, conn.user.id)
     await repo.set_bot_state(BUSINESS_CONNECTION_KEY, conn.id)
-    # One-time migration: move the owner's legacy global TickTick URL into their
-    # own per-user vault entry, so we can retire the shared/global fallback.
-    try:
-        from ..onboarding.ticktick_resolve import seed_owner_from_env
-
-        await seed_owner_from_env(str(conn.user.id))
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to seed owner TickTick URL into vault")
     logger.info(
         "Business connection %s for owner %s (enabled=%s)",
         conn.id,
@@ -78,15 +52,6 @@ async def on_business_connection(conn: BusinessConnection) -> None:
 async def _owner_id() -> int | None:
     val = await repo.get_bot_state(OWNER_ID_KEY)
     return int(val) if val is not None else None
-
-
-async def _conn_owner(connection_id: str | None) -> int | None:
-    """Owner of a specific business connection (multi-tenant), falling back to
-    the primary owner for legacy connections not yet in the registry."""
-    owner = await repo.get_connection_owner(connection_id)
-    if owner is not None:
-        return int(owner)
-    return await _owner_id()
 
 
 async def _download(bot: Bot, file_id: str) -> bytes:
@@ -123,18 +88,7 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     if not text:
         return  # nothing to extract from stickers/media-only
 
-    # Single-tenant lock: if this connection is positively registered to a
-    # NON-primary owner (e.g. a tenant onboarded before the lock was turned on),
-    # stop serving them. This never touches the primary owner (whose connection
-    # resolves to `primary`) nor unregistered/legacy connections (registered is
-    # None → falls back to the primary owner as before).
-    if not is_multi_tenant_allowed():
-        registered = await repo.get_connection_owner(message.business_connection_id)
-        primary = await _owner_id()
-        if registered is not None and primary is not None and int(registered) != primary:
-            return
-
-    owner_id = await _conn_owner(message.business_connection_id)
+    owner_id = await _owner_id()
     from_id = message.from_user.id if message.from_user else None
     direction = "out" if (owner_id is not None and from_id == owner_id) else "in"
 
@@ -153,7 +107,6 @@ async def on_business_message(message: Message, bot: Bot) -> None:
             "date": message.date,
         },
         title=message.chat.full_name or message.chat.username,
-        owner_id=str(owner_id) if owner_id is not None else None,
     )
 
 
@@ -172,7 +125,7 @@ async def on_group_message(message: Message, bot: Bot) -> None:
     if not text:
         return
 
-    # Groups carry no business connection; they belong to the primary owner.
+    # Groups carry no business connection; they belong to the owner.
     owner_id = await _owner_id()
     from_id = message.from_user.id if message.from_user else None
     direction = "out" if (owner_id is not None and from_id == owner_id) else "in"
@@ -191,7 +144,6 @@ async def on_group_message(message: Message, bot: Bot) -> None:
             "date": message.date,
         },
         title=message.chat.title,
-        owner_id=str(owner_id) if owner_id is not None else None,
     )
 
 

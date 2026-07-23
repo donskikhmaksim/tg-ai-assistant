@@ -23,7 +23,7 @@ from aiogram import Bot
 from .. import repositories as repo
 from ..config import get_settings
 from ..llm import claude, qwen
-from ..ticktick.mcp_client import TickTickMCP
+from ..ticktick.mcp_client import resolve_ticktick
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,11 @@ _HUMAN = {
 
 
 async def _ticktick_ok() -> tuple[bool, str]:
-    s = get_settings()
-    if not s.ticktick_mcp_url:
-        return True, ""  # not configured → nothing to probe
+    tt = await resolve_ticktick()
+    if tt is None:
+        return True, ""  # not configured (env or /connect) → nothing to probe
     try:
-        await TickTickMCP(s.ticktick_mcp_url).get_projects()
+        await tt.get_projects()
         return True, ""
     except Exception as e:  # noqa: BLE001
         return False, f"{type(e).__name__}: {str(e)[:200]}"
