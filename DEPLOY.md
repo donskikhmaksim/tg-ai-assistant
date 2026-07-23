@@ -137,6 +137,14 @@ Everything else is optional and documented inline in
   invite-gated `/setup` connector-onboarding buttons.
 - `BACKUP_S3_*` — optional daily `mongodump` → S3-compatible bucket (Cloudflare
   R2 recommended); see [Optional: scheduled Mongo backups](#optional-scheduled-mongo-backups).
+- `ONBOARDING_AI_HELP_ENABLED` (+ `ONBOARDING_AI_MODEL` /
+  `ONBOARDING_AI_MAX_MESSAGE_CHARS` / `ONBOARDING_AI_RATE_LIMIT_PER_HOUR` /
+  `ONBOARDING_AI_GLOBAL_HOURLY_CAP`) —
+  the Mini App's `/onboarding` screen and its "Ask AI" Q&A box (the one route
+  reachable pre-auth; see `app/web/server.py::api_onboarding_ask` for the
+  mitigations — per-IP rate limit keyed on the real peer IP, plus a hard
+  aggregate cap across all callers). Turn it off if you don't want strangers
+  spending your Claude budget.
 
 Railway injects `PORT` automatically.
 

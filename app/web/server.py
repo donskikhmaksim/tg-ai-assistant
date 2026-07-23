@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import html
 import logging
+import time
+from collections import OrderedDict, deque
 from datetime import timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from aiohttp import web
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..onboarding import ai_help
 from ..telegram.notify import group_watch_announcement
 from ..ticktick.mcp_client import TickTickMCP, resolve_ticktick
 from .auth import validate_init_data, verify_chat_token
@@ -64,7 +67,12 @@ async def _tt_for(_data: dict[str, Any]) -> TickTickMCP | None:
 # ---------------------------------------------------------------------------
 
 async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
+    # CORS-open (GET, no auth, no sensitive data — just {"ok": true}) so the
+    # onboarding screen's "check my deploy" step can poll a THIRD-PARTY
+    # instance's /health directly from the browser (client-side fetch, no
+    # backend proxy — see serve_onboarding / static/onboarding.html). This is
+    # the only route with this header; every other route stays same-origin.
+    return web.json_response({"ok": True}, headers={"Access-Control-Allow-Origin": "*"})
 
 
 async def serve_app(_: web.Request) -> web.Response:
@@ -475,6 +483,250 @@ async def api_bulk_settings(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "count": len(target_ids)})
 
 
+# ---------------------------------------------------------------------------
+# Onboarding screen (/onboarding) + "Ask AI" helper.
+#
+# Unlike every other route above, these are reachable by a STRANGER who has
+# not deployed anything yet — there is no owner and no Telegram initData to
+# validate against. So `api_onboarding_ask` does NOT call `_require_owner`;
+# instead it carries its own, narrower set of guards (see its docstring). The
+# walkthrough screen itself (serve_onboarding, api_onboarding_config) has no
+# side effects and returns nothing sensitive, so it needs no auth either.
+# ---------------------------------------------------------------------------
+
+async def serve_onboarding(_: web.Request) -> web.Response:
+    page = (_STATIC / "onboarding.html").read_text(encoding="utf-8")
+    return web.Response(text=page, content_type="text/html")
+
+
+async def api_onboarding_config(_: web.Request) -> web.Response:
+    """GET /api/onboarding/config — public, non-sensitive display config for the
+    onboarding screen (the same install links/URLs already shown to anyone in
+    the bot's own /start message for non-owners), plus whether the "Ask AI" box
+    should render at all."""
+    s = get_settings()
+    return web.json_response(
+        {
+            "railwayTemplateUrl": s.onboarding_railway_template_url,
+            "repoUrl": s.onboarding_repo_url,
+            "assistantSetupUrl": s.onboarding_assistant_setup_url,
+            "n8nSetupUrl": s.onboarding_n8n_setup_url,
+            "aiHelpEnabled": s.onboarding_ai_help_enabled,
+            "maxMessageChars": s.onboarding_ai_max_message_chars,
+        }
+    )
+
+
+# Per-IP sliding-window rate limiter — deliberately simple: in-memory,
+# per-process, no external dependency. Good enough for "don't let one stranger
+# hammer the owner's Claude budget"; NOT a distributed limiter (resets on
+# restart/redeploy, doesn't share state across replicas — acceptable for a
+# lightweight, single-instance anti-abuse gate on a low-traffic endpoint).
+#
+# SECURITY (fixed after an adversarial review found a working bypass): this
+# used to key on the client-supplied `X-Onboarding-Session` header (falling
+# back to a client-controllable `X-Forwarded-For` first hop). Both are
+# trivially spoofable — an attacker sends a fresh random session id (or fake
+# XFF) on every request and every request looks like a "new" caller, so the
+# 20/hour cap never engages. PoC: 50 requests with 50 random session ids, 0
+# rate-limited. Fixed by keying on `request.remote` instead: aiohttp's actual
+# TCP peer address for the connection, which is what Railway's edge sets as
+# the real connecting IP and which the client cannot rewrite. This is safe
+# specifically BECAUSE this app's deployment model is single-tenant/self-
+# hosted — each user runs their own single Railway service and there is no
+# shared multi-tenant reverse proxy in front of it that would legitimately
+# need us to trust a forwarded-for chain instead of the raw peer address. If
+# that ever changes (e.g. a shared edge in front of many tenants), this must
+# be revisited to trust only a specific, identified trusted-proxy hop rather
+# than reintroducing a client-supplied header as the key.
+_onboarding_rate_state: "OrderedDict[str, deque[float]]" = OrderedDict()
+_ONBOARDING_RATE_WINDOW_SECONDS = 3600
+_ONBOARDING_HISTORY_MAX_TURNS = 6
+# Hard backstop on the number of distinct keys tracked at once, so an
+# attacker who *can* rotate `request.remote` (real distinct source
+# addresses — far costlier than rotating a header, but not impossible at
+# botnet scale) still can't grow this dict without bound. Combined with the
+# age-based sweep in `_onboarding_prune_rate_state`, oldest/idle keys are
+# evicted first (LRU via `OrderedDict.move_to_end` on every touch).
+_ONBOARDING_RATE_STATE_MAX_KEYS = 5000
+
+# Aggregate/global cap, independent of per-IP keying (see
+# `_onboarding_global_rate_limited`) — protects the owner's Anthropic spend
+# even if per-IP keying were somehow defeated by many distinct real callers
+# (a botnet), where no single IP ever trips its own per-IP cap.
+_onboarding_global_rate_state: deque[float] = deque()
+
+
+def _onboarding_rate_limit_key(request: web.Request) -> str:
+    """The PRIMARY rate-limit key: the real TCP peer address. See the module
+    comment above `_onboarding_rate_state` for why `request.remote` (and not
+    a client-supplied header) is the trustworthy signal for this deployment
+    model."""
+    return f"ip:{request.remote or 'unknown'}"
+
+
+def _onboarding_session_label(request: web.Request) -> str:
+    """Client-supplied session id, kept ONLY as a secondary/informational
+    dimension (e.g. for support/debugging in logs) — NEVER used as, or mixed
+    into, the rate-limit key, since it's entirely attacker-controlled and
+    trusting it was the whole bug."""
+    session = (request.headers.get("X-Onboarding-Session") or "").strip()
+    return session[:64] if session else ""
+
+
+def _onboarding_prune_rate_state(now: float) -> None:
+    """Bound `_onboarding_rate_state`'s memory. Two layers:
+      - age-based: drop any bucket whose most recent timestamp has fully
+        aged out of the rate-limit window (that key had no recent activity);
+      - size-based backstop: if still over `_ONBOARDING_RATE_STATE_MAX_KEYS`
+        after the sweep, evict the least-recently-used entries first.
+    Called on every rate-limit check; cheap in the common case (few live
+    keys) since the endpoint is deliberately low-traffic."""
+    stale = [
+        k
+        for k, bucket in _onboarding_rate_state.items()
+        if not bucket or now - bucket[-1] > _ONBOARDING_RATE_WINDOW_SECONDS
+    ]
+    for k in stale:
+        del _onboarding_rate_state[k]
+    overflow = len(_onboarding_rate_state) - _ONBOARDING_RATE_STATE_MAX_KEYS
+    for _ in range(max(0, overflow)):
+        _onboarding_rate_state.popitem(last=False)  # oldest / least-recently-used
+
+
+def _onboarding_rate_limited(key: str, limit: int) -> bool:
+    now = time.monotonic()
+    bucket = _onboarding_rate_state.get(key)
+    if bucket is None:
+        bucket = deque()
+        _onboarding_rate_state[key] = bucket
+    else:
+        _onboarding_rate_state.move_to_end(key)
+    while bucket and now - bucket[0] > _ONBOARDING_RATE_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        # Still prune on rejected calls too, so a flood of over-cap requests
+        # can't itself dodge the size backstop.
+        _onboarding_prune_rate_state(now)
+        return True
+    bucket.append(now)
+    # Prune AFTER inserting this key so the size backstop accounts for it —
+    # otherwise the dict could sit at MAX_KEYS + 1 right after this call.
+    _onboarding_prune_rate_state(now)
+    return False
+
+
+def _onboarding_global_rate_limited(limit: int) -> bool:
+    """Aggregate cap across ALL callers/keys combined, checked only for
+    requests that already passed their own per-IP cap (so an IP that's
+    already blocked can't burn through the shared global budget for
+    everyone else). Backstops the per-IP keying against a botnet of many
+    distinct real IPs, none of which individually trips its own cap."""
+    now = time.monotonic()
+    while (
+        _onboarding_global_rate_state
+        and now - _onboarding_global_rate_state[0] > _ONBOARDING_RATE_WINDOW_SECONDS
+    ):
+        _onboarding_global_rate_state.popleft()
+    if len(_onboarding_global_rate_state) >= limit:
+        return True
+    _onboarding_global_rate_state.append(now)
+    return False
+
+
+async def api_onboarding_ask(request: web.Request) -> web.Response:
+    """POST /api/onboarding/ask {question, history?} — the onboarding "Ask AI"
+    box. Answers from a system-prompt-only briefing (app/onboarding/ai_help.py)
+    baked from this repo's + ticktick-mcp's onboarding docs — NOT codebase RAG
+    (see that module's docstring for the explicit v1 scope call).
+
+    This is the ONE endpoint in this file not gated by `_require_owner`: the
+    person asking has nothing of their own to authenticate with yet. Since
+    it's the widest-open door here, the abuse mitigations live at THIS layer
+    rather than relying on owner auth:
+      - `ONBOARDING_AI_HELP_ENABLED` kill switch (off → 404; the owner can
+        turn this off if they don't want strangers spending their API budget).
+      - Hard length cap on the question and on each history turn
+        (`ONBOARDING_AI_MAX_MESSAGE_CHARS`) — bounds both cost per call and
+        this from being usable as a free-form long-context relay.
+      - A small per-IP sliding-window rate limit
+        (`ONBOARDING_AI_RATE_LIMIT_PER_HOUR`), keyed on the real TCP peer
+        address (`request.remote`) — bounds calls per caller. NOT keyed on
+        the client-supplied `X-Onboarding-Session` header (kept only as an
+        informational label in logs) — see `_onboarding_rate_limit_key`.
+      - A hard aggregate cap across ALL callers combined
+        (`ONBOARDING_AI_GLOBAL_HOURLY_CAP`) — backstops the owner's spend
+        even if per-IP keying were defeated by many distinct real callers.
+      - A cheap default model (`ONBOARDING_AI_MODEL=haiku`) and a fixed, low
+        `max_tokens` (see ai_help.answer) — bounds cost per call further.
+      - No tool use, no codebase/DB access, no ability to take actions — it is
+        a single system-prompt completion call and nothing else, so even a
+        successful prompt-injection attempt in the question has nothing to
+        pivot into.
+      - Usage is logged (IP-based key, session label, question length,
+        outcome) for the owner's visibility — NOT the question text itself,
+        since it may contain the asker's own troubleshooting details (tokens,
+        error dumps).
+    This is still, deliberately, an OPEN endpoint reachable pre-auth — the
+    mitigations above bound the blast radius (cost + rate), they don't
+    eliminate it. Noted explicitly in the PR description.
+    """
+    s = get_settings()
+    if not s.onboarding_ai_help_enabled:
+        return web.json_response({"error": "disabled"}, status=404)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad json"}, status=400)
+
+    question = ((body or {}).get("question") or "").strip()
+    if not question:
+        return web.json_response({"error": "question required"}, status=400)
+    max_chars = s.onboarding_ai_max_message_chars
+    if len(question) > max_chars:
+        return web.json_response({"error": "question_too_long"}, status=400)
+
+    history: list[dict[str, str]] = []
+    raw_history = (body or {}).get("history")
+    if isinstance(raw_history, list):
+        for turn in raw_history[-_ONBOARDING_HISTORY_MAX_TURNS:]:
+            if not isinstance(turn, dict):
+                continue
+            role = turn.get("role")
+            text = str(turn.get("text") or "")[:max_chars]
+            if role in ("user", "assistant") and text.strip():
+                history.append({"role": role, "text": text})
+
+    key = _onboarding_rate_limit_key(request)
+    session_label = _onboarding_session_label(request)
+    if _onboarding_rate_limited(key, s.onboarding_ai_rate_limit_per_hour):
+        logger.info("onboarding ask: rate-limited (%s) session=%s", key, session_label)
+        return web.json_response({"error": "rate_limited"}, status=429)
+
+    if _onboarding_global_rate_limited(s.onboarding_ai_global_hourly_cap):
+        logger.info("onboarding ask: global hourly cap reached (key=%s)", key)
+        return web.json_response({"error": "global_limit_reached"}, status=429)
+
+    logger.info(
+        "onboarding ask: key=%s session=%s qlen=%d history_turns=%d",
+        key,
+        session_label,
+        len(question),
+        len(history),
+    )
+    try:
+        text = await ai_help.answer(question, history, model=s.onboarding_ai_model)
+    except Exception:  # noqa: BLE001 — no owner to DM; degrade the response instead
+        logger.exception("onboarding ask failed")
+        text = None
+    if not text:
+        return web.json_response(
+            {"answer": "Не смог получить ответ — попробуй ещё раз чуть позже."}
+        )
+    return web.json_response({"answer": text})
+
+
 async def api_cre_notify(request: web.Request) -> web.Response:
     """POST /cre/notify — приём алярмов/сводок CRE-парсера (cre-parser/reporter.py).
 
@@ -534,6 +786,9 @@ def build_app(bot: Any) -> web.Application:
             web.post("/cre/notify", api_cre_notify),
             web.get("/app", serve_app),
             web.get("/chat", serve_chat),
+            web.get("/onboarding", serve_onboarding),
+            web.get("/api/onboarding/config", api_onboarding_config),
+            web.post("/api/onboarding/ask", api_onboarding_ask),
             web.post("/api/data", api_data),
             web.get("/api/data", api_data),
             web.post("/api/sections", api_sections),
