@@ -205,19 +205,19 @@
     },
     "ticktick-mcp.create_project": {
       "class": "mutating",
-      "recommended_tier": "off",
+      "recommended_tier": "soft_guard",
       "has_manifest": false,
       "label": "🆕 Создать проект"
     },
     "ticktick-mcp.create_tag": {
       "class": "mutating",
-      "recommended_tier": "off",
+      "recommended_tier": "soft_guard",
       "has_manifest": false,
       "label": "🆕 Создать тег"
     },
     "ticktick-mcp.create_project_group": {
       "class": "mutating",
-      "recommended_tier": "off",
+      "recommended_tier": "soft_guard",
       "has_manifest": false,
       "label": "🆕 Создать группу проектов"
     },

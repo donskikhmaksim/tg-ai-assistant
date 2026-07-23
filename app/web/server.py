@@ -10,6 +10,7 @@ same-origin and need no CORS.
 """
 from __future__ import annotations
 
+import hmac
 import html
 import logging
 import time
@@ -595,7 +596,7 @@ async def api_policy_pull(request: web.Request) -> web.Response:
     `"v<version>"`, unchanged → 304."""
     token = get_settings().policy_pull_token
     auth = request.headers.get("Authorization", "")
-    if not token or auth != f"Bearer {token}":
+    if not token or not hmac.compare_digest(auth, f"Bearer {token}"):
         return web.json_response({"error": "unauthorized"}, status=401)
 
     policy = await repo.get_policy()

@@ -86,7 +86,7 @@ def test_resolve_falls_back_to_catalog_recommended_tier_when_no_owner_default():
     policy = {"defaults": {}, "tools": {}}
     assert policy_catalog.resolve_tier("ticktick-mcp.update_tasks", policy) == "soft_guard"
     assert policy_catalog.resolve_tier("ticktick-mcp.create_tasks", policy) == "hard_manifest"
-    assert policy_catalog.resolve_tier("ticktick-mcp.create_project", policy) == "off"
+    assert policy_catalog.resolve_tier("ticktick-mcp.create_project", policy) == "soft_guard"
 
 
 def test_resolve_unknown_tool_fails_safe_to_soft_guard():
