@@ -65,16 +65,40 @@ async def _poll_ticktick(tt: TickTickMCP) -> None:
         # Feed unavailable / unparseable this cycle — no-op (already logged).
         return
 
-    snapshots = await repo.list_state_snapshots(SERVER)
-    seeding = not snapshots  # first ever cycle → seed silently, emit nothing
+    # Whether we've ever COMPLETED a seed is gated on the sync_cursor row, not on
+    # `state_snapshots` being non-empty. A seed that's interrupted partway through
+    # (raised exception swallowed by the outer fail-open try/except, or the
+    # process just dying) leaves `state_snapshots` partially populated but never
+    # reaches the `set_sync_cursor` write below. If we gated on snapshot
+    # emptiness, the next cycle would see a non-empty (but partial) snapshot set,
+    # conclude seeding was already done, and diff against it — every task the
+    # partial seed missed would show before=None and get emitted as a spurious
+    # OP_CREATE (the false-creation-storm this poller exists to avoid). Gating on
+    # the cursor means a never-completed seed always re-seeds; re-seeding is
+    # idempotent (upsert), so this is safe even on a hard crash mid-loop.
+    cursor = await repo.get_sync_cursor(PROVIDER)
+    seeding = cursor is None
 
     if seeding:
+        seeded = 0
         for target_id, state in current.items():
-            await repo.upsert_state_snapshot(SERVER, target_id, state)
+            try:
+                await repo.upsert_state_snapshot(SERVER, target_id, state)
+                seeded += 1
+            except Exception:  # noqa: BLE001 — one bad write can't abort the whole seed
+                logger.debug(
+                    "audit poll: failed to seed snapshot for %s", target_id, exc_info=True
+                )
+        # Cursor write comes LAST, after the full loop, so a genuinely-interrupted
+        # process (not just a caught exception) never writes it — the next boot
+        # sees no cursor and safely re-seeds.
         await repo.set_sync_cursor(PROVIDER, {"lastPollAt": _now().isoformat()})
-        logger.info("audit poll (ticktick): seeded %d snapshot(s), no records", len(current))
+        logger.info(
+            "audit poll (ticktick): seeded %d/%d snapshot(s), no records", seeded, len(current)
+        )
         return
 
+    snapshots = await repo.list_state_snapshots(SERVER)
     changes = _diff_states(current, snapshots)
     if not changes:
         await repo.set_sync_cursor(PROVIDER, {"lastPollAt": _now().isoformat()})

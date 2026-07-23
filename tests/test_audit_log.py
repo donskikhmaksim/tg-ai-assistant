@@ -319,3 +319,118 @@ def test_poll_noop_when_no_connector(monkeypatch):
         return None
     monkeypatch.setattr(poller, "resolve_ticktick", none)
     _run(poller.run_ticktick_audit_poll())  # no connector → clean no-op
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# poller: seeding gated on sync_cursor presence, not snapshot emptiness —
+# regression tests for the false-creation-storm bug. A seed that's interrupted
+# partway through (exception swallowed by the outer fail-open try/except, or
+# the process just dying) used to leave `state_snapshots` partially populated
+# but `sync_cursors` never written; gating `seeding = not snapshots` then
+# treated the NEXT cycle as already-seeded and diffed against the partial
+# snapshot, emitting a spurious OP_CREATE for every task the interrupted seed
+# missed. Gating on the cursor's presence instead means a never-completed seed
+# always safely re-seeds (upsert is idempotent).
+# ─────────────────────────────────────────────────────────────────────────────
+class FakeTT:
+    """Minimal TickTickMCP stand-in: one project, a fixed set of task cards."""
+
+    def __init__(self, tasks):
+        self._tasks = tasks
+
+    async def get_projects(self):
+        return [{"id": "p1"}]
+
+    async def get_project_tasks(self, project_id, limit=None):
+        return self._tasks
+
+
+def _cards(*ids):
+    return [{"id": tid, "title": f"task-{tid}"} for tid in ids]
+
+
+def test_fresh_state_seeds_and_writes_cursor(monkeypatch):
+    """(1) No snapshots, no cursor → seeds correctly and writes the cursor."""
+    upserted = []
+    cursor_writes = []
+
+    async def fake_get_cursor(provider):
+        return None
+
+    async def fake_upsert(server, target_id, state):
+        upserted.append(target_id)
+
+    async def fake_set_cursor(provider, cursor):
+        cursor_writes.append(cursor)
+
+    async def boom_list_snapshots(server):
+        raise AssertionError("list_state_snapshots should not be called while seeding")
+
+    monkeypatch.setattr(repo, "get_sync_cursor", fake_get_cursor)
+    monkeypatch.setattr(repo, "upsert_state_snapshot", fake_upsert)
+    monkeypatch.setattr(repo, "set_sync_cursor", fake_set_cursor)
+    monkeypatch.setattr(repo, "list_state_snapshots", boom_list_snapshots)
+
+    _run(poller._poll_ticktick(FakeTT(_cards("t1", "t2"))))
+
+    assert set(upserted) == {"t1", "t2"}
+    assert len(cursor_writes) == 1
+
+
+def test_snapshots_without_cursor_reseeds_instead_of_diffing(monkeypatch):
+    """(2) Snapshots exist but sync_cursor does NOT (simulated crash mid old-
+    style seed) → the poller RE-SEEDS rather than treating it as already-seeded
+    and emitting spurious creates."""
+    upserted = []
+
+    async def fake_get_cursor(provider):
+        return None  # cursor never written → not "seeded", regardless of snapshots
+
+    async def fake_upsert(server, target_id, state):
+        upserted.append(target_id)
+
+    async def fake_set_cursor(provider, cursor):
+        pass
+
+    async def boom_list_snapshots(server):
+        raise AssertionError("should re-seed, not diff against the partial snapshot")
+
+    async def boom_record_mutation(**kwargs):
+        raise AssertionError("no audit records (spurious creates) while (re-)seeding")
+
+    monkeypatch.setattr(repo, "get_sync_cursor", fake_get_cursor)
+    monkeypatch.setattr(repo, "upsert_state_snapshot", fake_upsert)
+    monkeypatch.setattr(repo, "set_sync_cursor", fake_set_cursor)
+    monkeypatch.setattr(repo, "list_state_snapshots", boom_list_snapshots)
+    monkeypatch.setattr(audit_log, "record_mutation", boom_record_mutation)
+
+    _run(poller._poll_ticktick(FakeTT(_cards("t1", "t2", "t3"))))
+
+    assert set(upserted) == {"t1", "t2", "t3"}  # re-seeded silently, no creates emitted
+
+
+def test_seed_loop_survives_individual_upsert_failure(monkeypatch):
+    """(3) A single snapshot upsert failure doesn't abort the whole seed loop,
+    and the cursor is still written once the loop finishes."""
+    upserted = []
+    cursor_writes = []
+
+    async def fake_get_cursor(provider):
+        return None
+
+    async def flaky_upsert(server, target_id, state):
+        if target_id == "t2":
+            raise RuntimeError("transient mongo write error")
+        upserted.append(target_id)
+
+    async def fake_set_cursor(provider, cursor):
+        cursor_writes.append(cursor)
+
+    monkeypatch.setattr(repo, "get_sync_cursor", fake_get_cursor)
+    monkeypatch.setattr(repo, "upsert_state_snapshot", flaky_upsert)
+    monkeypatch.setattr(repo, "set_sync_cursor", fake_set_cursor)
+
+    _run(poller._poll_ticktick(FakeTT(_cards("t1", "t2", "t3"))))
+
+    assert set(upserted) == {"t1", "t3"}  # t2 failed but didn't abort the loop
+    assert len(cursor_writes) == 1  # cursor still written after the loop completes
