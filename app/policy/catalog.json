@@ -1,0 +1,272 @@
+{
+  "_comment": "Static tool catalog for the manifest-policy admin (Phase 1: storage + UI only, no enforcement here — see app/policy/catalog.py and CLAUDE.md). Keyed \"<server>.<tool>\". Seeded from the live ticktick-mcp tool set known this session (~72 tools) plus the audit facts already established: which tools are already hard-gated by ticktick-mcp's OWN existing manifest system (automation_key + plan_*/execute_* twins), and #54's soft-guard/bare classification for everything else. class ∈ {destructive, external, mutating, read} drives the fallback tier when a tool has no explicit override (see defaults below); recommended_tier is this catalog's own per-tool seed, used before falling back to the class default. has_manifest marks tools with an existing plan_*/execute_* (or automation_key) escalation path — the Mini App greys out the 'hard' option for a tool that lacks one (nothing to route to yet).",
+  "defaults": {
+    "destructive": "hard_manifest",
+    "external": "hard_manifest",
+    "mutating": "soft_guard",
+    "read": "off"
+  },
+  "tools": {
+    "ticktick-mcp.create_tasks": {
+      "class": "mutating",
+      "recommended_tier": "hard_manifest",
+      "has_manifest": true,
+      "label": "🆕 Создать задачи",
+      "note": "Bare call already refuses without automation_key, forcing plan_task_creation → execute_task_creation."
+    },
+    "ticktick-mcp.plan_task_creation": {
+      "class": "read",
+      "recommended_tier": "off",
+      "has_manifest": true,
+      "label": "📝 Запланировать создание"
+    },
+    "ticktick-mcp.execute_task_creation": {
+      "class": "mutating",
+      "recommended_tier": "hard_manifest",
+      "has_manifest": true,
+      "label": "▶️ Выполнить создание (по плану)"
+    },
+    "ticktick-mcp.create_subtask": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🆕 Создать подзадачу"
+    },
+    "ticktick-mcp.delete_tasks": {
+      "class": "destructive",
+      "recommended_tier": "soft_guard",
+      "has_manifest": true,
+      "label": "🗑 Удалить задачи",
+      "note": "Single-task delete runs soft-guarded (id/title cross-check); a bulk call already auto-escalates to plan_task_deletion/execute_task_deletion."
+    },
+    "ticktick-mcp.plan_task_deletion": {
+      "class": "read",
+      "recommended_tier": "off",
+      "has_manifest": true,
+      "label": "📝 Запланировать удаление"
+    },
+    "ticktick-mcp.execute_task_deletion": {
+      "class": "destructive",
+      "recommended_tier": "hard_manifest",
+      "has_manifest": true,
+      "label": "▶️ Выполнить удаление (по плану)"
+    },
+    "ticktick-mcp.delete_task_with_subtasks": {
+      "class": "destructive",
+      "recommended_tier": "hard_manifest",
+      "has_manifest": true,
+      "label": "🗑 Удалить задачу с подзадачами"
+    },
+    "ticktick-mcp.plan_declutter": {
+      "class": "read",
+      "recommended_tier": "off",
+      "has_manifest": true,
+      "label": "📝 Запланировать разбор (declutter)",
+      "note": "New tool, not yet live in production — seeded ahead of time."
+    },
+    "ticktick-mcp.execute_declutter": {
+      "class": "destructive",
+      "recommended_tier": "hard_manifest",
+      "has_manifest": true,
+      "label": "▶️ Выполнить разбор (declutter)",
+      "note": "New tool, not yet live in production — bulk mutation, seeded ahead of time."
+    },
+    "ticktick-mcp.update_tasks": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "✏️ Изменить задачи"
+    },
+    "ticktick-mcp.complete_tasks": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "✅ Завершить задачи"
+    },
+    "ticktick-mcp.move_tasks": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "➡️ Переместить задачи"
+    },
+    "ticktick-mcp.restore_tasks": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "♻️ Восстановить задачи из корзины"
+    },
+    "ticktick-mcp.abandon_task": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🚫 Отменить задачу"
+    },
+    "ticktick-mcp.duplicate_task": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🧬 Дублировать задачу"
+    },
+    "ticktick-mcp.set_task_parent": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🔗 Назначить родительскую задачу"
+    },
+    "ticktick-mcp.unset_task_parent": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🔓 Убрать родительскую задачу"
+    },
+    "ticktick-mcp.set_task_tags": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🏷 Назначить теги задаче"
+    },
+    "ticktick-mcp.update_project": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "✏️ Изменить проект"
+    },
+    "ticktick-mcp.delete_project": {
+      "class": "destructive",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🗑 Удалить проект"
+    },
+    "ticktick-mcp.archive_project": {
+      "class": "destructive",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "📦 Архивировать проект"
+    },
+    "ticktick-mcp.checkin_habit": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "✔️ Отметить привычку"
+    },
+    "ticktick-mcp.rename_tag": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "✏️ Переименовать тег"
+    },
+    "ticktick-mcp.delete_tag": {
+      "class": "destructive",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🗑 Удалить тег"
+    },
+    "ticktick-mcp.add_task_comment": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "💬 Добавить комментарий"
+    },
+    "ticktick-mcp.update_task_comment": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "💬 Изменить комментарий"
+    },
+    "ticktick-mcp.delete_task_comment": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "💬 Удалить комментарий"
+    },
+    "ticktick-mcp.attach_file_to_task": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "📎 Прикрепить файл к задаче"
+    },
+    "ticktick-mcp.create_project_column": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🆕 Создать раздел проекта"
+    },
+    "ticktick-mcp.move_project_to_group": {
+      "class": "mutating",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "➡️ Переместить проект в группу"
+    },
+    "ticktick-mcp.delete_project_group": {
+      "class": "destructive",
+      "recommended_tier": "soft_guard",
+      "has_manifest": false,
+      "label": "🗑 Удалить группу проектов"
+    },
+    "ticktick-mcp.create_project": {
+      "class": "mutating",
+      "recommended_tier": "off",
+      "has_manifest": false,
+      "label": "🆕 Создать проект"
+    },
+    "ticktick-mcp.create_tag": {
+      "class": "mutating",
+      "recommended_tier": "off",
+      "has_manifest": false,
+      "label": "🆕 Создать тег"
+    },
+    "ticktick-mcp.create_project_group": {
+      "class": "mutating",
+      "recommended_tier": "off",
+      "has_manifest": false,
+      "label": "🆕 Создать группу проектов"
+    },
+    "ticktick-mcp.build_recurrence_rule": {
+      "class": "read",
+      "recommended_tier": "off",
+      "has_manifest": false,
+      "label": "🧩 Собрать правило повторения (helper)"
+    },
+    "ticktick-mcp.build_reminder": {
+      "class": "read",
+      "recommended_tier": "off",
+      "has_manifest": false,
+      "label": "🧩 Собрать напоминание (helper)"
+    },
+    "ticktick-mcp.get_all_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Все задачи"},
+    "ticktick-mcp.get_changes": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Изменения"},
+    "ticktick-mcp.get_completed_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Завершённые задачи"},
+    "ticktick-mcp.get_engaged_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи в работе"},
+    "ticktick-mcp.get_habit_checkins": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Отметки привычек"},
+    "ticktick-mcp.get_habits": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Привычки"},
+    "ticktick-mcp.get_inbox_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи во «Входящих»"},
+    "ticktick-mcp.get_next_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Следующие задачи"},
+    "ticktick-mcp.get_overdue_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Просроченные задачи"},
+    "ticktick-mcp.get_project": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Проект"},
+    "ticktick-mcp.get_project_members": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Участники проекта"},
+    "ticktick-mcp.get_project_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи проекта"},
+    "ticktick-mcp.get_projects": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Проекты"},
+    "ticktick-mcp.get_recurring_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Повторяющиеся задачи"},
+    "ticktick-mcp.get_statistics": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Статистика"},
+    "ticktick-mcp.get_task": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задача"},
+    "ticktick-mcp.get_task_activity": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Активность по задаче"},
+    "ticktick-mcp.get_task_comments": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Комментарии к задаче"},
+    "ticktick-mcp.get_task_info": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Инфо о задаче"},
+    "ticktick-mcp.get_tasks_by_assignee": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи по исполнителю"},
+    "ticktick-mcp.get_tasks_by_priority": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи по приоритету"},
+    "ticktick-mcp.get_tasks_by_tag": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи по тегу"},
+    "ticktick-mcp.get_tasks_due_in_days": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи со сроком через N дней"},
+    "ticktick-mcp.get_tasks_due_this_week": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи на этой неделе"},
+    "ticktick-mcp.get_tasks_due_today": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи на сегодня"},
+    "ticktick-mcp.get_tasks_due_tomorrow": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Задачи на завтра"},
+    "ticktick-mcp.get_trash": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Корзина"},
+    "ticktick-mcp.list_filters": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Фильтры"},
+    "ticktick-mcp.list_project_columns": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Разделы проекта"},
+    "ticktick-mcp.list_project_groups": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Группы проектов"},
+    "ticktick-mcp.list_tags": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Теги"},
+    "ticktick-mcp.run_filter": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Выполнить фильтр"},
+    "ticktick-mcp.search_all_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "🔍 Поиск по всем задачам"},
+    "ticktick-mcp.search_tasks": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "🔍 Поиск задач"},
+    "ticktick-mcp.operation_report": {"class": "read", "recommended_tier": "off", "has_manifest": false, "label": "📋 Отчёт по операции"}
+  }
+}

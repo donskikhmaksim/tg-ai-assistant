@@ -24,6 +24,7 @@ from aiohttp import web
 from .. import repositories as repo
 from ..config import get_settings
 from ..onboarding import ai_help
+from ..policy.catalog import CLASSES, TIERS, load_catalog, merged_defaults, resolve_tier
 from ..telegram.notify import group_watch_announcement
 from ..ticktick.mcp_client import TickTickMCP, resolve_ticktick
 from .auth import validate_init_data, verify_chat_token
@@ -484,6 +485,138 @@ async def api_bulk_settings(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Manifest-policy admin (Phase 1 — storage + Mini App UI only).
+#
+# Per-tool tri-state enforcement policy (hard_manifest | soft_guard | off),
+# edited here and stored in this bot's own Mongo (`policy` collection, see
+# app/repositories.py::get_policy/save_policy). The static tool CATALOG
+# (class + recommended tier + has_manifest per tool, app/policy/catalog.json)
+# is the seed; this collection stores only the owner's overrides, resolved
+# over the catalog (app/policy/catalog.py::resolve_tier).
+#
+# IMPORTANT: nothing in this repo — or anywhere yet — ENFORCES the resolved
+# tier. This is the control plane only. Each MCP server (ticktick-mcp first)
+# will, in a LATER and separate phase, pull the policy from the machine
+# endpoint below (`GET /policy`) and gate its own tool calls with it. Until
+# then, editing this screen has no operational effect beyond being persisted.
+# ---------------------------------------------------------------------------
+
+async def api_get_policy(request: web.Request) -> web.Response:
+    """GET /api/policy — owner-auth. Returns the static catalog merged with
+    the stored policy (owner's class defaults + per-tool overrides) plus each
+    tool's currently-RESOLVED tier, for the Mini App's "🛡 Манифест-политика"
+    screen. See the module comment above: display/edit only, not enforced."""
+    await _require_owner(request)
+    policy = await repo.get_policy()
+    catalog = load_catalog()
+
+    tools_out: dict[str, Any] = {}
+    for key, meta in catalog.get("tools", {}).items():
+        tools_out[key] = {
+            **meta,
+            "override": (policy.get("tools") or {}).get(key),
+            "resolved": resolve_tier(key, policy, catalog),
+        }
+
+    updated_at = policy.get("updated_at")
+    return web.json_response(
+        {
+            "version": policy.get("version", 0),
+            "updatedAt": updated_at.isoformat() if updated_at else None,
+            "updatedBy": policy.get("updated_by"),
+            "defaults": merged_defaults(policy, catalog),
+            "catalogDefaults": catalog.get("defaults", {}),
+            "tools": tools_out,
+        }
+    )
+
+
+async def api_post_policy(request: web.Request) -> web.Response:
+    """POST /api/policy — owner-auth. Body (either/both, PATCH semantics —
+    merged over the current doc, not a wholesale replace):
+      {"defaults": {"<class>": "<tier>", ...}}   — class-wide overrides
+      {"tools": {"<server>.<tool>": "<tier>"|null, ...}}  — per-tool overrides
+        (null clears the override, reverting that tool to its class/catalog
+        default). Validates every class/tool key and tier value against the
+        known set (CLASSES/TIERS) and the static catalog before persisting;
+        bumps `version` and returns it."""
+    data = await _require_owner(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad json"}, status=400)
+
+    raw_defaults = (body or {}).get("defaults")
+    raw_tools = (body or {}).get("tools")
+
+    if raw_defaults is not None:
+        if not isinstance(raw_defaults, dict):
+            return web.json_response({"error": "defaults must be an object"}, status=400)
+        for klass, tier in raw_defaults.items():
+            if klass not in CLASSES:
+                return web.json_response({"error": f"unknown class: {klass}"}, status=400)
+            if tier not in TIERS:
+                return web.json_response({"error": f"unknown tier: {tier}"}, status=400)
+
+    known_tools = set(load_catalog().get("tools", {}).keys())
+    if raw_tools is not None:
+        if not isinstance(raw_tools, dict):
+            return web.json_response({"error": "tools must be an object"}, status=400)
+        for key, tier in raw_tools.items():
+            if key not in known_tools:
+                return web.json_response({"error": f"unknown tool: {key}"}, status=400)
+            if tier is not None and tier not in TIERS:
+                return web.json_response({"error": f"unknown tier: {tier}"}, status=400)
+
+    current = await repo.get_policy()
+    defaults = dict(current.get("defaults") or {})
+    tools = dict(current.get("tools") or {})
+    if raw_defaults:
+        defaults.update(raw_defaults)
+    if raw_tools:
+        for key, tier in raw_tools.items():
+            if tier is None:
+                tools.pop(key, None)
+            else:
+                tools[key] = tier
+
+    uid = (data.get("user") or {}).get("id")
+    saved = await repo.save_policy(defaults, tools, uid)
+    logger.info("Mini App: policy updated by %s -> v%d", uid, saved["version"])
+    return web.json_response({"ok": True, "version": saved["version"]})
+
+
+async def api_policy_pull(request: web.Request) -> web.Response:
+    """GET /policy — MACHINE endpoint for an MCP server's policy client to
+    pull the current policy (a LATER phase; no server consumes this yet — see
+    the module comment above). Auth: Bearer POLICY_PULL_TOKEN, a separate
+    shared secret, NOT the bot token — same posture as /cre/notify's
+    CRE_NOTIFY_SECRET. Supports `If-None-Match` for cheap polling: ETag is
+    `"v<version>"`, unchanged → 304."""
+    token = get_settings().policy_pull_token
+    auth = request.headers.get("Authorization", "")
+    if not token or auth != f"Bearer {token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    policy = await repo.get_policy()
+    catalog = load_catalog()
+    version = policy.get("version", 0)
+    etag = f'"v{version}"'
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers={"ETag": etag})
+
+    return web.json_response(
+        {
+            "version": version,
+            "defaults": merged_defaults(policy, catalog),
+            "tools": policy.get("tools") or {},
+            "catalog": catalog.get("tools", {}),
+        },
+        headers={"ETag": etag},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Onboarding screen (/onboarding) + "Ask AI" helper.
 #
 # Unlike every other route above, these are reachable by a STRANGER who has
@@ -800,6 +933,9 @@ def build_app(bot: Any) -> web.Application:
             web.get("/api/settings", api_get_settings),
             web.post("/api/settings", api_save_settings),
             web.post("/api/settings/bulk", api_bulk_settings),
+            web.get("/api/policy", api_get_policy),
+            web.post("/api/policy", api_post_policy),
+            web.get("/policy", api_policy_pull),
         ]
     )
     return app

@@ -36,6 +36,11 @@ feature catalog is `docs/FEATURES.md`.
 - `app/web/server.py` + `app/web/static/app.html` — the owner-only Mini App
   (settings cabinet); `app/web/static/onboarding.html` + `app/onboarding/
   ai_help.py` — the pre-auth onboarding screen + "Ask AI" Q&A helper.
+- `app/policy/` — manifest-policy admin (Phase 1: storage + Mini App UI only,
+  see its Status entry below). `catalog.json` is the static tool catalog
+  (class + recommended tier + has_manifest per tool); `catalog.py` resolves
+  the effective tier; `GET/POST /api/policy` (owner-auth, `app/web/server.py`)
+  + `repositories.get_policy/save_policy` are the store.
 - `tests/` — pure-logic tests (windows, deadline formatting).
 
 ## Status
@@ -64,6 +69,17 @@ Live and verified in production (Railway, auto-deploy from `main`):
   connector installers + `scripts/setup.sh` self-deploy of the bot (now forks
   upstream into the deployer's GitHub and connects the fork); fork auto-sync
   workflow (every ~5 min) for deployers.
+- Manifest-policy admin — **Phase 1 only**: per-tool tri-state confirmation
+  policy (`hard_manifest` | `soft_guard` | `off`, keyed `"<server>.<tool>"`)
+  with a class-based (destructive/external/mutating/read) fallback, stored in
+  this bot's own Mongo and edited from the Mini App's "🛡 Манифест-политика"
+  screen (`app/policy/`, `GET/POST /api/policy`). This phase is STORAGE + UI
+  ONLY — nothing enforces the resolved tier yet, on this or any other server.
+  A static catalog (`app/policy/catalog.json`) seeds ~70 known ticktick-mcp
+  tools with a class + recommended tier ahead of the full #54 audit landing.
+  Also ships a machine-readable `GET /policy` (bearer `POLICY_PULL_TOKEN`,
+  ETag/304) for a LATER phase where each MCP server (ticktick-mcp first) pulls
+  and enforces this policy in its own repo — not built here.
 - Mini App onboarding screen (`/onboarding`, `app/web/static/onboarding.html`):
   a friendlier self-host walkthrough (deploy links/CLI one-liner, a client-side
   "check my deploy" health probe) plus an "Ask AI" Q&A box — the ONE Mini App
