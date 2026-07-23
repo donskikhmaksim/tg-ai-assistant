@@ -46,6 +46,7 @@ from ..config import get_settings
 from ..onboarding.invites import create_invite, has_access, redeem_invite
 from ..onboarding.notes import create_note
 from ..ticktick.mcp_client import resolve_ticktick
+from .handlers_repost import BTN_REPOST
 from .notify import group_watch_announcement
 
 TICKTICK_URL_KEY = "ticktick_mcp_url"
@@ -85,6 +86,7 @@ def _main_menu() -> ReplyKeyboardMarkup:
         [KeyboardButton(text=BTN_BIND)],
         [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_UNBIND)],
         [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_GLOBAL)],
+        [KeyboardButton(text=BTN_REPOST)],
     ]
     # The Mini App (Phase 2) — a one-tap WebApp for managing all bindings at once.
     url = get_settings().webapp_url
