@@ -297,6 +297,22 @@ class Settings(BaseSettings):
     backup_hour: int = 4              # local hour (default_timezone) the backup runs
     backup_retention_days: int = 30   # prune objects under the prefix older than this
 
+    # ─── Manifest-policy admin (Phase 1 — storage + Mini App UI only) ────
+    # Per-tool tri-state enforcement policy (hard_manifest | soft_guard | off)
+    # for MCP tool calls, edited by the owner in the Mini App's "🛡 Манифест-
+    # политика" screen and stored in this bot's OWN Mongo (see app/policy/,
+    # GET/POST /api/policy). NO MCP server enforces this yet — that's a later,
+    # separate phase that lives in each MCP server's own repo (e.g.
+    # ticktick-mcp), which will pull the policy over HTTPS via the machine
+    # endpoint below and cache it locally.
+    #
+    # Bearer secret for that machine-readable GET /policy pull endpoint (NOT
+    # the bot token) — same posture as CRE_NOTIFY_SECRET: a separate, narrow
+    # shared secret for one machine-to-machine route. Empty → GET /policy
+    # always 401s; harmless today since nothing pulls it yet, but set it
+    # before wiring an MCP server's policy client in a future phase.
+    policy_pull_token: str = ""
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600

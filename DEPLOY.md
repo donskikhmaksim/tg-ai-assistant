@@ -145,6 +145,12 @@ Everything else is optional and documented inline in
   mitigations — per-IP rate limit keyed on the real peer IP, plus a hard
   aggregate cap across all callers). Turn it off if you don't want strangers
   spending your Claude budget.
+- `POLICY_PULL_TOKEN` — the manifest-policy admin's machine-pull secret
+  (Mini App: "🛡 Манифест-политика", per-tool hard/guard/off confirmation
+  tiers for MCP tool calls). **Phase 1 only** — the policy is stored and
+  editable here, but no MCP server enforces it yet; leaving this unset just
+  means `GET /policy` 401s, which is harmless until a later phase wires an
+  MCP server's policy client to it. See `app/policy/`.
 
 Railway injects `PORT` automatically.
 

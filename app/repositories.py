@@ -621,3 +621,58 @@ async def set_sync_cursor(provider: str, cursor: Any) -> None:
         },
         upsert=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# policy (manifest-policy admin — Phase 1: storage only, no enforcement here)
+#
+# One document per instance (single-tenant today, per CLAUDE.md):
+# `_id: "policy:__global__"`. Holds only the OWNER's overrides — class-wide
+# `defaults` and per-tool `tools` overrides — resolved over the static tool
+# catalog (app/policy/catalog.py + catalog.json), which supplies each tool's
+# `class` and a recommended tier. Nothing in this repo enforces the resolved
+# tier yet: see app/policy/__init__.py for the phase split (this is the
+# control plane; each MCP server's own pull+enforce is a later, separate
+# phase in that server's repo).
+# ---------------------------------------------------------------------------
+
+_POLICY_DOC_ID = "policy:__global__"
+
+
+async def get_policy() -> dict[str, Any]:
+    """The stored policy doc, or a sane empty default if never saved.
+
+    Empty defaults (`{}`) mean "no owner overrides yet" — every tool falls
+    back through the catalog's own class defaults / recommended tier (see
+    app/policy/catalog.py::resolve_tier).
+    """
+    db = get_db()
+    doc = await db.policy.find_one({"_id": _POLICY_DOC_ID})
+    if not doc:
+        return {"_id": _POLICY_DOC_ID, "version": 0, "defaults": {}, "tools": {}}
+    return doc
+
+
+async def save_policy(
+    defaults: dict[str, str], tools: dict[str, str], updated_by: int | None
+) -> dict[str, Any]:
+    """Overwrite `defaults`/`tools` wholesale, bump `version`, return the saved doc.
+
+    Callers (the Mini App API) are expected to merge their partial edit over
+    the CURRENT doc before calling this (read-modify-write), same as
+    `update_chat_settings` callers do for chat settings — this function itself
+    does a full replace, it doesn't merge.
+    """
+    db = get_db()
+    current = await db.policy.find_one({"_id": _POLICY_DOC_ID}, {"version": 1})
+    next_version = (current or {}).get("version", 0) + 1
+    doc = {
+        "_id": _POLICY_DOC_ID,
+        "version": next_version,
+        "updated_at": utcnow(),
+        "updated_by": updated_by,
+        "defaults": defaults,
+        "tools": tools,
+    }
+    await db.policy.replace_one({"_id": _POLICY_DOC_ID}, doc, upsert=True)
+    return doc

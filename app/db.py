@@ -13,6 +13,11 @@ Audit/restore plane (Phase 0 — see docs logging-restore design):
   state_snapshots — last-known state per object, keyed (server, targetId),
                     for out-of-band diffing (no TTL — pruned by inactivity)
   sync_cursors    — per-provider delta cursor (sync token / checkpoint)
+
+Manifest-policy admin (Phase 1 — storage only, see app/policy/):
+  policy          — single doc (_id "policy:__global__") holding the owner's
+                    per-tool/class enforcement-tier overrides. No index needed
+                    beyond the default _id index (one doc today).
 """
 from __future__ import annotations
 

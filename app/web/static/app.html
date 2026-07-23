@@ -171,6 +171,34 @@
       color: var(--hint); font-size: 11px; text-transform: uppercase;
       letter-spacing: .05em; margin: 16px 4px 6px;
     }
+
+    /* Manifest-policy admin ("🛡 Манифест-политика") */
+    .policy-header-row {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 12px; color: var(--hint); margin-bottom: 8px;
+    }
+    .policy-saved { color: var(--accent); }
+    .policy-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .policy-class-header {
+      font-size: 12px; font-weight: 600; color: var(--hint);
+      margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .03em;
+    }
+    .policy-class-header:first-of-type { margin-top: 0; }
+    .policy-row {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--card);
+    }
+    .policy-row:last-child { border-bottom: none; }
+    .policy-row-label { font-size: 13px; flex: 1; min-width: 0; }
+    .policy-override-dot { color: var(--accent); font-size: 10px; margin-left: 4px; }
+    .tier-toggle { display: flex; flex-shrink: 0; border-radius: 8px; overflow: hidden; background: var(--card); }
+    .tier-btn {
+      border: none; background: none; color: var(--hint); font-size: 11px;
+      padding: 6px 8px; cursor: pointer; white-space: nowrap;
+    }
+    .tier-btn.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+    .tier-btn.disabled { opacity: .35; cursor: not-allowed; }
+    .policy-readcount { margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -355,6 +383,7 @@
     }
 
     $c.innerHTML = banner;
+    $c.appendChild(buildPolicyCard());
     $c.appendChild(buildGlobalCard());
 
     const groups = allChats.filter(c => c.kind === "group");
@@ -374,6 +403,144 @@
     }
 
     document.getElementById("searchInput").addEventListener("input", filterCards);
+  }
+
+  // ── Manifest-policy card ("🛡 Манифест-политика") ──────────────────────────
+  //
+  // Phase 1: storage + editing UI only. Nothing enforces the tier chosen here
+  // yet — no MCP server pulls/consumes this policy in this phase (that lands
+  // separately, later, in each MCP server's own repo). This screen just lets
+  // the owner view/edit + persist the policy.
+
+  const TIER_LABELS = { hard_manifest: "Жёстко", soft_guard: "Guard", off: "Выкл" };
+  const CLASS_LABELS = {
+    destructive: "🗑 Разрушительные",
+    external: "🌐 Внешние",
+    mutating: "✏️ Изменяющие",
+    read: "👁 Только чтение",
+  };
+  const CLASS_ORDER = ["destructive", "external", "mutating"];
+
+  function buildPolicyCard() {
+    const card = document.createElement("div");
+    card.className = "chat-card";
+    card.dataset.policyCard = "1";
+    card.dataset.name = "манифест политика policy manifest";
+    card.dataset.alias = "";
+    card.innerHTML = `
+      <div class="chat-header" onclick="toggleCard(this)">
+        <span class="chat-emoji">🛡</span>
+        <div class="chat-info">
+          <div class="chat-name-row"><span class="chat-name">Манифест-политика</span></div>
+          <div class="chat-meta">Подтверждение перед действиями MCP-инструментов</div>
+        </div>
+        <span class="chat-chevron">▾</span>
+      </div>
+      <div class="chat-body">
+        <div class="policy-body"><div class="empty" style="margin-top:0">Загрузка при открытии…</div></div>
+      </div>`;
+    return card;
+  }
+
+  async function loadPolicy(card) {
+    if (card.dataset.policyLoaded) return;
+    card.dataset.policyLoaded = "1";
+    const body = card.querySelector(".policy-body");
+    try {
+      const data = await api("/api/policy");
+      renderPolicy(card, data);
+    } catch (e) {
+      delete card.dataset.policyLoaded;
+      body.innerHTML = `<div class="err">Не удалось загрузить: ${esc(e.message)}</div>`;
+    }
+  }
+
+  function policyRowHtml(key, meta) {
+    function seg(tier) {
+      const disabled = tier === "hard_manifest" && !meta.has_manifest;
+      const active = meta.resolved === tier;
+      return `<button class="tier-btn ${active ? "active" : ""} ${disabled ? "disabled" : ""}"
+        data-key="${esc(key)}" data-tier="${tier}" ${disabled ? "disabled" : ""}
+        title="${disabled ? "Нет пути через manifest ещё — недоступно" : ""}">${TIER_LABELS[tier]}</button>`;
+    }
+    const overrideDot = meta.override != null
+      ? '<span class="policy-override-dot" title="Переопределено вручную">●</span>' : "";
+    return `<div class="policy-row">
+        <div class="policy-row-label">${esc(meta.label || key)}${overrideDot}</div>
+        <div class="tier-toggle">${seg("hard_manifest")}${seg("soft_guard")}${seg("off")}</div>
+      </div>`;
+  }
+
+  function renderPolicy(card, data) {
+    const body = card.querySelector(".policy-body");
+    const entries = Object.entries(data.tools || {});
+    const byClass = { destructive: [], external: [], mutating: [], read: [] };
+    entries.forEach(([key, meta]) => {
+      (byClass[meta.class] || byClass.mutating).push([key, meta]);
+    });
+
+    let html = `
+      <div class="policy-header-row">
+        <span>Версия v${data.version || 0}${data.updatedAt ? " · " + esc(new Date(data.updatedAt).toLocaleString("ru-RU")) : ""}</span>
+        <span class="policy-saved"></span>
+      </div>
+      <div class="policy-presets">
+        <button class="quick-btn" data-preset="hard_manifest">🔒 Строгий — всё под подтверждение</button>
+        <button class="quick-btn" data-preset="soft_guard">⚖️ Обычный</button>
+        <button class="quick-btn" data-preset="off">🔓 Без подтверждений</button>
+      </div>`;
+
+    CLASS_ORDER.forEach(cls => {
+      const list = byClass[cls];
+      if (!list.length) return;
+      list.sort((a, b) => (a[1].label || a[0]).localeCompare(b[1].label || b[0], "ru"));
+      html += `<div class="policy-class-header">${CLASS_LABELS[cls]}</div>`;
+      list.forEach(([key, meta]) => { html += policyRowHtml(key, meta); });
+    });
+
+    const readCount = byClass.read.length;
+    html += `<div class="field-hint policy-readcount">${readCount} инструментов только для чтения — не настраивается</div>`;
+    body.innerHTML = html;
+
+    body.querySelectorAll(".tier-btn").forEach(btn => {
+      if (!btn.disabled) btn.addEventListener("click", () => onTierClick(card, btn));
+    });
+    body.querySelectorAll("[data-preset]").forEach(btn => {
+      btn.addEventListener("click", () => applyPreset(card, btn.dataset.preset));
+    });
+  }
+
+  async function onTierClick(card, btn) {
+    const key = btn.dataset.key;
+    const tier = btn.dataset.tier;
+    const saved = card.querySelector(".policy-saved");
+    saved.textContent = "Сохраняю…";
+    try {
+      const r = await api("/api/policy", { tools: { [key]: tier } });
+      saved.textContent = "✓ v" + r.version;
+      toast("Сохранено");
+      card.querySelectorAll(`.tier-btn[data-key="${key.replace(/"/g, '\\"')}"]`).forEach(b => {
+        b.classList.toggle("active", b.dataset.tier === tier);
+      });
+      const row = btn.closest(".policy-row");
+      if (row && !row.querySelector(".policy-override-dot")) {
+        row.querySelector(".policy-row-label").insertAdjacentHTML(
+          "beforeend", '<span class="policy-override-dot" title="Переопределено вручную">●</span>'
+        );
+      }
+    } catch (e) { saved.textContent = "Ошибка: " + e.message; }
+  }
+
+  async function applyPreset(card, tier) {
+    const saved = card.querySelector(".policy-saved");
+    saved.textContent = "Применяю пресет…";
+    try {
+      const r = await api("/api/policy", { defaults: { destructive: tier, external: tier, mutating: tier } });
+      saved.textContent = "✓ v" + r.version;
+      toast("Пресет применён");
+      delete card.dataset.policyLoaded;
+      await loadPolicy(card);
+    } catch (e) { saved.textContent = "Ошибка: " + e.message; }
   }
 
   // ── Global card ───────────────────────────────────────────────────────────
@@ -543,9 +710,14 @@
     const isOpen = body.classList.toggle("open");
     chev.classList.toggle("open", isOpen);
     if (isOpen) {
-      const chatId = header.closest(".chat-card").dataset.chatId || "__global__";
-      loadSettings(chatId, header.closest(".chat-card"));
-      header.closest(".chat-card").querySelectorAll("textarea").forEach(autoResize);
+      const card = header.closest(".chat-card");
+      if (card.dataset.policyCard) {
+        loadPolicy(card);
+        return;
+      }
+      const chatId = card.dataset.chatId || "__global__";
+      loadSettings(chatId, card);
+      card.querySelectorAll("textarea").forEach(autoResize);
     }
   }
 
