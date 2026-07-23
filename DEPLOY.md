@@ -199,14 +199,24 @@ anything. The one-command installer (`scripts/setup.sh`) sets this up for you:
 it forks this repo into your GitHub account with `gh`, enables Actions on the
 fork, and connects the **fork** (not the upstream) as the Railway source — the
 critical detail, since Railway only redeploys on a push into the repo it is
-connected to. If you deployed some other way, do it manually:
+connected to. If you deployed some other way, run this one-liner:
 
-1. **Deploy from your fork**, not from a manual upload. In the Railway service →
-   **Settings → Source**, connect it to *your* fork's `main` and turn on **Deploy
-   on push**.
-2. In your fork on GitHub, open the **Actions** tab and click **"I understand my
-   workflows, go ahead and enable them"** (GitHub disables Actions on new forks
-   by default).
+```bash
+gh_user=$(gh api user --jq .login) && \
+gh repo fork donskikhmaksim/tg-ai-assistant --clone=false && \
+gh api -X PUT "repos/$gh_user/tg-ai-assistant/actions/permissions" -F enabled=true && \
+railway service source connect --repo "$gh_user/tg-ai-assistant" --branch main --service tg-ai-assistant
+```
+
+What it does (if you prefer to do it manually):
+
+1. **Fork this repo** into your GitHub account (via `gh repo fork`, or on
+   GitHub.com if you prefer).
+2. **Enable Actions** on your fork. In your fork on GitHub, open the **Actions**
+   tab and click **"I understand my workflows, go ahead and enable them"**
+   (GitHub disables Actions on new forks by default).
+3. **Deploy from your fork**. In the Railway service → **Settings → Source**,
+   connect it to *your* fork's `main` and turn on **Deploy on push**.
 
 That's it. The bundled [`Sync from upstream`](.github/workflows/sync-upstream.yml)
 workflow fast-forwards your fork from the maintainer every ~5 minutes; each sync
