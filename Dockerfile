@@ -5,20 +5,31 @@ WORKDIR /app
 # mongodb-database-tools (mongodump / mongorestore) for the OPTIONAL scheduled
 # Mongo backup job (see app/backup/mongo_backup.py). The job itself no-ops at
 # runtime unless BACKUP_S3_* is configured, but the binaries must exist in the
-# image for it to ever work. Installed from MongoDB's official apt repo,
-# matched to this base image's Debian codename (currently "bookworm").
-# NOTE: not verified against an actual `docker build` in this environment (no
-# Docker available here) — please confirm `mongodump --version` works on the
-# first real build, and adjust the codename/repo line if the base image's
-# Debian version has since changed.
+# image for it to ever work.
+#
+# Installed via direct download of MongoDB's prebuilt .deb (NOT via MongoDB's
+# apt repo): the `python:3.12-slim` base image now resolves to Debian trixie,
+# whose apt/sqv verifier rejects MongoDB's repo signing key (SHA1
+# self-signature, considered insecure since 2026-02-01) with
+# "Sub-process /usr/bin/sqv returned an error code (1)" — an external
+# MongoDB/Debian compatibility issue with no fixed timeline. MongoDB does not
+# yet publish a trixie build, so we grab the debian12 (bookworm) .deb; its
+# only deps (libc6, libgssapi-krb5-2, libkrb5-3, libk5crypto3, libcomerr2,
+# libkrb5support0, libkeyutils1) are ordinary shared libs present in trixie's
+# repos, and bookworm-linked binaries run fine against trixie's newer glibc.
+# `apt-get install ./*.deb` (rather than `dpkg -i`) resolves those deps
+# automatically. Bump MONGO_TOOLS_VERSION when a newer release is needed;
+# check https://www.mongodb.com/try/download/database-tools for the current
+# stable 100.x version.
+ARG MONGO_TOOLS_VERSION=100.17.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates \
-    && curl -fsSL https://pgp.mongodb.com/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg \
-    && CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME") \
-    && echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/debian ${CODENAME}/mongodb-org/7.0 main" \
-        > /etc/apt/sources.list.d/mongodb-org-7.0.list \
-    && apt-get update && apt-get install -y --no-install-recommends mongodb-database-tools \
-    && rm -rf /var/lib/apt/lists/*
+        curl ca-certificates \
+    && curl -fsSL -o /tmp/mongodb-database-tools.deb \
+        "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-${MONGO_TOOLS_VERSION}.deb" \
+    && apt-get install -y --no-install-recommends /tmp/mongodb-database-tools.deb \
+    && rm -f /tmp/mongodb-database-tools.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && mongodump --version
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
