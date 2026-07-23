@@ -29,6 +29,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 from ..config import Settings, get_settings
 from .s3 import S3Client
@@ -55,6 +56,32 @@ def _missing_required_vars(s: Settings) -> list[str]:
     if not s.backup_s3_secret_key:
         missing.append("BACKUP_S3_SECRET_KEY")
     return missing
+
+
+def _redact_mongo_uri(uri: str) -> str:
+    """Redact the userinfo (username:password) portion of a Mongo connection
+    string so it's safe to embed in a raised exception or a log line, e.g.
+    ``mongodb://user:pass@host/db`` -> ``mongodb://***:***@host/db``.
+
+    Uses urllib.parse rather than a regex so it stays correct even if the
+    password contains special characters. Returns the input unchanged if
+    there's nothing to redact (no ``@``, or no ``:`` before it — i.e. no
+    credentials present) — a safe no-op rather than guessing.
+    """
+    if "@" not in uri:
+        return uri
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return uri
+    netloc = parts.netloc
+    if "@" not in netloc:
+        return uri
+    creds, _, host_part = netloc.rpartition("@")
+    if ":" not in creds:
+        return uri
+    redacted_netloc = f"***:***@{host_part}"
+    return urlunsplit((parts.scheme, redacted_netloc, parts.path, parts.query, parts.fragment))
 
 
 def build_mongodump_cmd(mongo_url: str, archive_path: str) -> list[str]:
@@ -127,9 +154,13 @@ async def _run_mongodump(mongo_url: str, archive_path: str) -> None:
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"mongodump exited {proc.returncode}: {stderr.decode(errors='replace')[:2000]}"
-        )
+        stderr_text = stderr.decode(errors="replace")[:2000]
+        # Defense in depth: if mongodump ever echoes the URI verbatim (e.g. an
+        # early parse error before its own credential redaction kicks in),
+        # strip the raw credentials out before they can reach a raised
+        # exception (and, downstream, a `logger.exception(...)` call).
+        stderr_text = stderr_text.replace(mongo_url, _redact_mongo_uri(mongo_url))
+        raise RuntimeError(f"mongodump exited {proc.returncode}: {stderr_text}")
 
 
 async def _prune_old(client: S3Client, prefix: str, retention_days: int) -> None:

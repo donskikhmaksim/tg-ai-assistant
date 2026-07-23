@@ -169,6 +169,73 @@ def test_run_mongodump_raises_on_nonzero_exit(monkeypatch):
         asyncio.run(mongo_backup._run_mongodump("mongodb://host/db", "/tmp/a.gz"))
 
 
+# ─── credential redaction (secret-hygiene: URI must never reach a raised ──
+# exception or a log call with its password intact) ──────────────────────
+
+def test_redact_mongo_uri_masks_username_and_password():
+    redacted = mongo_backup._redact_mongo_uri("mongodb://user:s3cr3t@host:27017/db")
+    assert redacted == "mongodb://***:***@host:27017/db"
+    assert "s3cr3t" not in redacted
+    assert "user" not in redacted
+
+
+def test_redact_mongo_uri_handles_srv_scheme_and_query_string():
+    redacted = mongo_backup._redact_mongo_uri(
+        "mongodb+srv://user:s3cr3t@cluster0.mongodb.net/db?retryWrites=true"
+    )
+    assert redacted == "mongodb+srv://***:***@cluster0.mongodb.net/db?retryWrites=true"
+    assert "s3cr3t" not in redacted
+
+
+def test_redact_mongo_uri_handles_multi_host_replica_set():
+    uri = "mongodb://user:s3cr3t@host1:27017,host2:27017,host3:27017/db?replicaSet=rs0"
+    redacted = mongo_backup._redact_mongo_uri(uri)
+    assert redacted == "mongodb://***:***@host1:27017,host2:27017,host3:27017/db?replicaSet=rs0"
+    assert "s3cr3t" not in redacted
+
+
+def test_redact_mongo_uri_noop_when_no_credentials():
+    assert mongo_backup._redact_mongo_uri("mongodb://localhost:27017/db") == (
+        "mongodb://localhost:27017/db"
+    )
+
+
+def test_redact_mongo_uri_noop_when_username_only_no_password():
+    # No ":" before the "@" — nothing that looks like a password to mask;
+    # graceful no-op rather than guessing.
+    uri = "mongodb://user@host/db"
+    assert mongo_backup._redact_mongo_uri(uri) == uri
+
+
+def test_run_mongodump_failure_redacts_uri_echoed_verbatim_in_stderr(monkeypatch):
+    """Simulates the adversarial-review scenario: mongodump hits an early
+    URI-parse error and echoes the --uri argument verbatim in stderr, before
+    its own credential redaction would have kicked in. The RuntimeError raised
+    by _run_mongodump must not carry the raw password."""
+    mongo_url = "mongodb://dbuser:sup3rSecretPW@prod-host:27017/tg_ai_assistant"
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (
+                b"",
+                f"Failed: error parsing uri: {mongo_url}".encode(),
+            )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(mongo_backup._run_mongodump(mongo_url, "/tmp/a.gz"))
+
+    message = str(exc_info.value)
+    assert "sup3rSecretPW" not in message
+    assert "dbuser" not in message
+    assert "***:***@prod-host:27017" in message
+
+
 # ─── S3 helper parsing (pure functions, no network) ──────────────────────
 
 def test_parse_s3_datetime_with_and_without_fractional_seconds():
