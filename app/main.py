@@ -8,6 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from aiogram.types import MenuButtonWebApp, WebAppInfo
 
+from .audit.poller import run_ticktick_audit_poll
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
@@ -56,6 +57,24 @@ async def main() -> None:
     )
     scheduler.start()
     logger.info("Batch scheduler started: every %d min", settings.batch_interval_min)
+
+    # Audit/restore out-of-band poller (Phase 0): read-only delta poll of TickTick
+    # to capture hand-edits + collaborator edits into the durable `audit_log`.
+    # Fail-open and read-only; no-ops when no TickTick connector is configured.
+    # Google pollers (Drive/Gmail/Calendar) are a later phase.
+    if settings.audit_enabled:
+        scheduler.add_job(
+            run_ticktick_audit_poll,
+            "interval",
+            seconds=settings.audit_poll_interval_seconds,
+            id="audit_poll_ticktick",
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info(
+            "Audit out-of-band poller (ticktick) scheduled: every %d s",
+            settings.audit_poll_interval_seconds,
+        )
 
     bot = build_bot()
     dp = build_dispatcher()

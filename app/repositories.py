@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from bson import ObjectId
 from pymongo import ReturnDocument, UpdateOne
 
 from .db import get_db
@@ -518,5 +519,105 @@ async def clear_chat_settings_field(chat_id: str, field: str) -> None:
     await db.chat_settings.update_one(
         {"chatId": chat_id},
         {"$unset": {field: ""}, "$setOnInsert": {"chatId": chat_id}},
+        upsert=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# audit_log / state_snapshots / sync_cursors  (Phase 0 — audit/restore plane)
+#
+# audit_log       — append-only mutation trail (TTL on `ts`, ~90d). Written pre-
+#                   mutation (before + intent) then patched with the result, the
+#                   same "persist before processing" discipline as raw_messages.
+# state_snapshots — last-known state per object, keyed (server, targetId), used
+#                   by the out-of-band poller to diff what changed. No TTL.
+# sync_cursors    — per-provider delta cursor (sync token / checkpoint).
+#
+# These are thin storage helpers; the writer/attribution logic lives in
+# app/audit/. Every helper here is called from fail-open call sites — a raise
+# never reaches the pipeline.
+# ---------------------------------------------------------------------------
+
+async def insert_audit_record(doc: dict[str, Any]) -> ObjectId:
+    """Append one audit record, returning its _id (an ObjectId)."""
+    db = get_db()
+    res = await db.audit_log.insert_one(doc)
+    return res.inserted_id
+
+
+async def finalize_audit_record(record_id: ObjectId, fields: dict[str, Any]) -> None:
+    """Patch an existing audit record with `after`/`result`/`diff` etc."""
+    db = get_db()
+    await db.audit_log.update_one({"_id": record_id}, {"$set": fields})
+
+
+async def get_audit_record(record_id: ObjectId) -> dict[str, Any] | None:
+    """Fetch one audit record by _id (used to recompute a diff on finalize)."""
+    db = get_db()
+    return await db.audit_log.find_one({"_id": record_id})
+
+
+async def get_recent_audit_records(
+    server: str,
+    target_ids: list[str],
+    since: datetime,
+    capture_plane: str = "in_band",
+) -> list[dict[str, Any]]:
+    """Recent audit records for a server touching any of `target_ids` at/after
+    `since` — used by the out-of-band poller to spot our own edits echoing back
+    through the provider's sync feed (so they're not double-logged)."""
+    db = get_db()
+    query: dict[str, Any] = {"server": server, "ts": {"$gte": since}}
+    if capture_plane:
+        query["capture_plane"] = capture_plane
+    if target_ids:
+        query["target.id"] = {"$in": target_ids}
+    cursor = db.audit_log.find(query).sort("ts", -1)
+    return [d async for d in cursor]
+
+
+async def get_state_snapshot(server: str, target_id: str) -> dict[str, Any] | None:
+    """Last-known snapshot for one object, or None if never seen."""
+    db = get_db()
+    return await db.state_snapshots.find_one({"server": server, "targetId": target_id})
+
+
+async def list_state_snapshots(server: str) -> dict[str, dict[str, Any]]:
+    """All snapshots for a server as {targetId: snapshot_doc}."""
+    db = get_db()
+    cursor = db.state_snapshots.find({"server": server})
+    return {d["targetId"]: d async for d in cursor}
+
+
+async def upsert_state_snapshot(
+    server: str, target_id: str, state: dict[str, Any]
+) -> None:
+    """Store/overwrite the last-known state of one object (in place)."""
+    db = get_db()
+    await db.state_snapshots.update_one(
+        {"server": server, "targetId": target_id},
+        {
+            "$set": {"state": state, "updatedAt": utcnow()},
+            "$setOnInsert": {"server": server, "targetId": target_id},
+        },
+        upsert=True,
+    )
+
+
+async def get_sync_cursor(provider: str) -> dict[str, Any] | None:
+    """The stored delta cursor row for a provider, or None."""
+    db = get_db()
+    return await db.sync_cursors.find_one({"provider": provider})
+
+
+async def set_sync_cursor(provider: str, cursor: Any) -> None:
+    """Persist a provider's delta cursor (sync token / checkpoint / timestamp)."""
+    db = get_db()
+    await db.sync_cursors.update_one(
+        {"provider": provider},
+        {
+            "$set": {"cursor": cursor, "updatedAt": utcnow()},
+            "$setOnInsert": {"provider": provider},
+        },
         upsert=True,
     )

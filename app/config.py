@@ -227,6 +227,25 @@ class Settings(BaseSettings):
     retrieve_top_k: int = 6
     retrieve_min_score: float = 0.45
 
+    # ─── Audit / restore logging (Phase 0 — foundation) ──────────────────
+    # A durable, append-only `audit_log` plane records every change to the
+    # owner's TickTick/Google state (who/what/when + before/after) for ~90 days,
+    # so almost anything can be restored. Two capture planes land in one log:
+    #   • in-band     — changes WE make through an MCP (logged at the call layer)
+    #   • out-of-band — changes made by the owner in the UI or a collaborator in
+    #                   a shared list, caught by a periodic delta poller.
+    # Fail-open by design: when disabled or misconfigured the writers are a
+    # no-op and the poller no-ops — audit logging must NEVER break the pipeline
+    # (mirrors the qwen/transcribe fail-open pattern).
+    audit_enabled: bool = True
+    # Retention: TTL index on `audit_log.ts`. Default 90 days (7776000s). Sizing
+    # is negligible (~tens of MB / 90d); recreated-on-change like `raw_ttl`.
+    audit_ttl_seconds: int = 7776000
+    # Out-of-band delta poll cadence (seconds). Default 5 min. The floor is the
+    # provider's rate limits, not our cost (deltas are tiny). Phase 0 wires the
+    # TickTick poller only; Google pollers land in a later phase.
+    audit_poll_interval_seconds: int = 300
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600
