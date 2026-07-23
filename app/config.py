@@ -163,9 +163,15 @@ class Settings(BaseSettings):
     # Takes priority over default_section when set.
     default_section_id: str = ""
     # Reference timezone for a deadline that has a clock time but no city/zone
-    # named in the conversation. IANA name (e.g. "Europe/Moscow"). Deadlines
-    # discussed without a timezone are interpreted here. Set it to YOUR home
-    # zone; the default is UTC so a fresh deploy never silently offsets times.
+    # named in the conversation. IANA name (e.g. "America/Los_Angeles"). TIMED
+    # deadlines discussed without a zone are interpreted here; all-day (date-only)
+    # deadlines are zone-independent and never offset.
+    #
+    # IMPORTANT — keep three zones equal, or timed deadlines land in the wrong
+    # local time: DEFAULT_TIMEZONE (here) == ticktick-mcp's USER_TIMEZONE == the
+    # TickTick account's display zone. The default below is UTC only so a fresh
+    # deploy never silently offsets times; SET IT to your real home zone. main.py
+    # logs a startup warning while it is still UTC (see #36).
     default_timezone: str = "UTC"
 
     # Onboarding (public self-host). The project is a PUBLIC repo and every

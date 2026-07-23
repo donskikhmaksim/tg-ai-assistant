@@ -33,6 +33,14 @@ async def main() -> None:
             "TICKTICK_MCP_URL is not set — extracted tasks will be stored locally "
             "but NOT pushed to TickTick. Deploy your own ticktick-mcp and set the URL."
         )
+    if settings.default_timezone == "UTC":
+        logger.warning(
+            "DEFAULT_TIMEZONE is UTC — timed deadlines will be interpreted in UTC, "
+            "not your home zone. Set DEFAULT_TIMEZONE to your IANA zone (e.g. "
+            "America/Los_Angeles) and keep it EQUAL to ticktick-mcp's USER_TIMEZONE "
+            "and your TickTick account zone, or timed deadlines land in the wrong "
+            "local time (all-day dates are zone-independent and unaffected). See #36."
+        )
 
     await init_db()
     await init_global_defaults()
