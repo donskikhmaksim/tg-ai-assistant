@@ -553,6 +553,185 @@ async def judge_same_task(a: str, b: str) -> bool | None:
         return None
 
 
+# ── Final reality check (within-window) ─────────────────────────────────────
+# `status_updates` above already tracks a task across WINDOWS — it matches
+# against the memory's open-task list, built from PRIOR runs. It structurally
+# cannot catch a task proposed and resolved/cancelled WITHIN the same window
+# (e.g. "надо позвонить в DMV" ... two messages later ... "уже позвонил") —
+# that task was never in the open-task list to begin with, so there is
+# nothing for status_updates to match against. Nor does anything today catch
+# two new_tasks in the SAME window that are actually one task at different
+# stages of refinement (a vague early mention, then specifics a few messages
+# later). This stage covers exactly those two same-window gaps — one call,
+# the window text + every fresh candidate together, on the strongest model.
+# FAIL-SAFE in both directions: on any doubt or error, nothing is dropped and
+# nothing is merged — a stray duplicate is far better than a lost task.
+
+VERIFY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "still_open": {"type": "boolean"},
+                    "merges_into": {
+                        "type": ["integer", "null"],
+                        "description": "Set ONLY when this candidate is the SAME "
+                        "task as another candidate IN THIS WINDOW, caught at an "
+                        "earlier/less specific stage — the 0-based index of the "
+                        "OTHER candidate with the fuller, more final version. "
+                        "That other candidate is kept; this one is dropped (any "
+                        "detail only present here is preserved separately). "
+                        "Never point two candidates at each other or at itself.",
+                    },
+                    "reason": {"type": ["string", "null"]},
+                },
+                "required": ["index", "still_open", "merges_into", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+_VERIFY_SYSTEM = (
+    "You review a list of candidate tasks freshly extracted from a chat "
+    "conversation window, against the WINDOW TEXT itself — a final sanity "
+    "check before any of them become real tasks. Two independent checks, "
+    "for EACH candidate:\n\n"
+    "1) RESOLVED WITHIN THIS WINDOW — still_open=false ONLY when the window "
+    "text ITSELF, later on, clearly and explicitly shows the matter was "
+    "resolved, cancelled, or is no longer needed (e.g. someone proposes "
+    "calling a place, and a few messages later in the SAME window says they "
+    "already called it, or that it turned out to be unnecessary). Do NOT use "
+    "this for tasks resolved in EARLIER windows/history — that is tracked "
+    "separately; you only see this one window. Never guess or infer a "
+    "resolution that isn't actually stated. When unsure, or the window is "
+    "simply silent on what happened next, default to still_open=true.\n\n"
+    "2) SAME TASK, DIFFERENT STAGE — within this SAME window, the same real "
+    "task can appear twice worded differently: an early vague mention, and a "
+    "later, more specific refinement of the exact same ask (a name, amount, "
+    "or detail added once the conversation got concrete). When you find such "
+    "a pair, set merges_into on the LESS complete/earlier one to the index "
+    "of the MORE complete/later one — only for genuinely the SAME underlying "
+    "task, never for two related-but-distinct asks (e.g. 'buy X' and "
+    "'return X' are different actions, not stages of one task). When unsure "
+    "whether two candidates are really the same task, leave merges_into null "
+    "on both — an extra task is far better than silently losing a distinct "
+    "one.\n\n"
+    "Return exactly one verdict per candidate, using its given 0-based index."
+)
+
+_VERIFY_CLI_INSTRUCTION = (
+    "\n\n# OUTPUT FORMAT (STRICT)\n"
+    "Return ONLY a single JSON object that validates against this JSON Schema. "
+    "No prose, no explanation, no markdown, no code fences — just the raw JSON object.\n"
+    "JSON Schema:\n" + json.dumps(VERIFY_SCHEMA, ensure_ascii=False)
+)
+
+
+def _verify_candidate_line(index: int, c: dict[str, Any]) -> str:
+    line = f"{index}. {c.get('task', '')}"
+    if c.get("details"):
+        line += f" — {c['details']}"
+    if c.get("deadline"):
+        line += f" (due {c['deadline']})"
+    return line
+
+
+class VerifyResult:
+    """Per-candidate verdicts from verify_still_open, SAME ORDER as input.
+    `keep[i]` False → drop (resolved/cancelled within this window).
+    `merge_into[i]` set → this candidate is the SAME task as candidate
+    `merge_into[i]`, caught at an earlier/less complete stage this window;
+    drop it too, after folding any detail unique to it into the survivor."""
+
+    def __init__(self, n: int):
+        self.keep: list[bool] = [True] * n
+        self.merge_into: list[int | None] = [None] * n
+
+
+async def verify_still_open(
+    window_text: str, candidates: list[dict[str, Any]]
+) -> VerifyResult:
+    """`candidates` need at least a `task` key (`details`/`deadline` included
+    in the prompt when present). Never raises — any failure keeps everything
+    independent and unmerged, since this stage only trims/merges, never
+    rescues."""
+    result = VerifyResult(len(candidates))
+    if not candidates:
+        return result
+    s = get_settings()
+    user = (
+        "# WINDOW\n" + window_text + "\n\n"
+        "# CANDIDATE TASKS (freshly extracted from this window)\n"
+        + "\n".join(_verify_candidate_line(i, c) for i, c in enumerate(candidates))
+        + "\n"
+    )
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": _VERIFY_SYSTEM,
+                "prompt": user + _VERIFY_CLI_INSTRUCTION,
+                "model": (s.dedup_judge_model or s.claude_cli_model),
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
+            raw = _parse_json_loose(data.get("result") or "")
+        else:
+            resp = await _get_client().messages.create(
+                model=resolve_api_model(s.anthropic_model),
+                max_tokens=3000,
+                thinking={"type": "adaptive"},
+                output_config={
+                    "effort": "medium",
+                    "format": {"type": "json_schema", "schema": VERIFY_SCHEMA},
+                },
+                system=[
+                    {"type": "text", "text": _VERIFY_SYSTEM,
+                     "cache_control": {"type": "ephemeral"}}
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), None)
+            if text is None:
+                raise ValueError(f"no text block (stop_reason={resp.stop_reason})")
+            raw = json.loads(text)
+
+        n = len(candidates)
+        for v in raw.get("verdicts", []):
+            i = v.get("index")
+            if not (isinstance(i, int) and 0 <= i < n):
+                continue
+            if v.get("still_open") is False:
+                result.keep[i] = False
+                logger.info(
+                    "verify_still_open: dropping %r — %s",
+                    candidates[i].get("task"), v.get("reason"),
+                )
+                continue  # resolved candidates never also merge
+            j = v.get("merges_into")
+            if isinstance(j, int) and 0 <= j < n and j != i:
+                result.merge_into[i] = j
+                logger.info(
+                    "verify_still_open: merging %r into %r — %s",
+                    candidates[i].get("task"), candidates[j].get("task"), v.get("reason"),
+                )
+    except Exception:  # noqa: BLE001 — fail-safe: keep everything, unmerged
+        logger.warning("verify_still_open failed — keeping all candidates", exc_info=True)
+        return VerifyResult(len(candidates))
+    return result
+
+
 async def healthcheck() -> tuple[bool, str]:
     """Canary for the daily watchdog that exercises the SAME tier-2 path as
     extract(): the CLI shim when claude_cli_url is set (catches a dead shim, e.g.

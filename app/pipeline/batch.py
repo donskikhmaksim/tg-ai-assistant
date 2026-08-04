@@ -152,6 +152,13 @@ async def process_chat(chat_id: str) -> None:
     if new_summary:
         await repo.set_summary(chat_id, new_summary)
 
+    # Final within-window reality check: drop tasks this SAME window already
+    # resolves, and merge ones that are one task at different refinement
+    # stages of this window (see verify_still_open — status_updates above
+    # only covers cross-window resolution, not within-window).
+    verify_result = await claude.verify_still_open(window_text, result.get("new_tasks", []))
+    result["new_tasks"] = _apply_verify_result(result.get("new_tasks", []), verify_result)
+
     # Single-tenant: one global TickTick account for the whole instance. When no
     # URL is configured (env or /connect) tasks are kept local until it is set.
     tt = await resolve_ticktick()
@@ -555,6 +562,53 @@ async def _enrich_duplicate(
     # Mark the in-memory candidate too, so a second duplicate in this same
     # batch doesn't try to transfer again.
     match["deadline"] = deadline
+
+
+def _apply_verify_result(
+    candidates: list[dict[str, Any]], result: "claude.VerifyResult"
+) -> list[dict[str, Any]]:
+    """Drop candidates verify_still_open marked resolved-within-this-window,
+    then fold any info unique to a merged-away candidate into its surviving
+    target — the unique detail may live in its TITLE (an early vague mention
+    often IS just a title, no details) as much as in `details`, so containment
+    is checked against the kept candidate's title+details combined; nothing
+    is silently lost. `source_message_ids` are unioned so provenance survives
+    the merge. Chains (i merges into j, j merges into k) resolve to their
+    final root, bounded defensively — one window's candidate list is small."""
+    n = len(candidates)
+    keep = list(result.keep)
+    merge_into = list(result.merge_into)
+
+    for _ in range(n):
+        changed = False
+        for i in range(n):
+            j = merge_into[i]
+            if j is not None and merge_into[j] is not None and merge_into[j] != i:
+                merge_into[i] = merge_into[j]
+                changed = True
+        if not changed:
+            break
+
+    for i, j in enumerate(merge_into):
+        if j is None or not keep[i] or i == j or not keep[j]:
+            continue  # nothing to fold, or a degenerate/dropped target
+        kept_text = " ".join(
+            x for x in (candidates[j].get("task"), candidates[j].get("details")) if x
+        )
+        dropped_text = " — ".join(
+            x for x in (candidates[i].get("task"), candidates[i].get("details")) if x
+        )
+        extra = sd.merge_details(kept_text, dropped_text)
+        if extra:
+            existing = (candidates[j].get("details") or "").strip()
+            candidates[j]["details"] = f"{existing}\n{extra}" if existing else extra
+        merged_ids = set(candidates[j].get("source_message_ids") or [])
+        merged_ids.update(candidates[i].get("source_message_ids") or [])
+        if merged_ids:
+            candidates[j]["source_message_ids"] = sorted(merged_ids)
+        keep[i] = False
+
+    return [c for c, k in zip(candidates, keep) if k]
 
 
 async def _create_new_tasks(
