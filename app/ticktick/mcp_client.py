@@ -355,12 +355,20 @@ class TickTickMCP:
             return m.group(1).strip()
         return _first_id(text) or await self.find_task_id(title)
 
-    async def find_task_id(self, title: str) -> str | None:
+    async def find_task_id(
+        self, title: str, exclude: set[str] | None = None
+    ) -> str | None:
         """Look up a task id by its EXACT title via search_tasks. Best-effort:
         returns None if no task with this exact title is found (e.g. the v2 cache
         hasn't settled yet). Exact match — NOT substring: a substring match would
         wrongly link a task to a longer near-duplicate's id, so two different docs
-        could share one ticktickTaskId."""
+        could share one ticktickTaskId.
+
+        `exclude` skips ids already claimed by another doc earlier in the same
+        run (see scripts/push_local_tasks.py): two local docs can legitimately
+        share the exact same title text (same or different chat), and search
+        results don't otherwise distinguish which TickTick task belongs to
+        which doc — without this, both would collapse onto the same id."""
         try:
             raw = await self.call("search_tasks", {"search_term": title})
         except Exception:  # noqa: BLE001
@@ -371,9 +379,12 @@ class TickTickMCP:
             m_id = _SEARCH_ID_RE.search(line)
             if not m_id:
                 continue
+            tid = m_id.group(1)
+            if exclude and tid in exclude:
+                continue
             m_title = _SEARCH_TITLE_RE.match(line.strip())
             if m_title and m_title.group(1).strip().lower() == needle:
-                return m_id.group(1)
+                return tid
         return None
 
     async def get_project_tasks(

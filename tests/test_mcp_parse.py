@@ -205,3 +205,26 @@ def test_find_task_id_exact_not_substring():
         return "- [Inbox] Составить ТЗ  (id:EXACT9 proj:p)"
     tt.call = fake_exact  # type: ignore[assignment]
     assert asyncio.run(tt.find_task_id("Составить ТЗ")) == "EXACT9"
+
+
+def test_find_task_id_exclude_skips_already_claimed_id():
+    """Two different local docs can share the exact same title (see
+    scripts/push_local_tasks.py). If TickTick already has two tasks with that
+    title, `exclude` must make the second lookup skip the id the first doc
+    already claimed instead of collapsing both docs onto the same TickTick id."""
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        return (
+            "- [Inbox] Позвонить в банк  (id:FIRST1 proj:p)\n"
+            "- [Inbox] Позвонить в банк  (id:SECOND2 proj:p)"
+        )
+
+    tt.call = fake_call  # type: ignore[assignment]
+    first = asyncio.run(tt.find_task_id("Позвонить в банк"))
+    assert first == "FIRST1"
+    second = asyncio.run(tt.find_task_id("Позвонить в банк", exclude={first}))
+    assert second == "SECOND2"
+    # once both are excluded, nothing is left to bind to
+    third = asyncio.run(tt.find_task_id("Позвонить в банк", exclude={first, second}))
+    assert third is None
