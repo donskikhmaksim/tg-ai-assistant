@@ -199,6 +199,15 @@ def test_audit_indexes_created():
     cur = store["sync_cursors"]["single"][0]
     assert cur["keys"] == [("provider", 1)] and cur["kwargs"].get("unique")
 
+    # embedding_failures TTL on ts, reusing audit_ttl_seconds.
+    ef_ttl = [
+        s for s in store["embedding_failures"]["single"]
+        if s["kwargs"].get("name") == "embedding_failures_ttl"
+    ]
+    assert ef_ttl, "embedding_failures_ttl index missing"
+    assert ef_ttl[0]["kwargs"]["expireAfterSeconds"] == 4242
+    assert ef_ttl[0]["keys"] == [("ts", 1)]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # reconcile: diff / op inference

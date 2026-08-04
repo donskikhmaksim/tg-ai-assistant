@@ -1,4 +1,17 @@
+from app.config import Settings
 from app.pipeline.dedup import is_all_day_deadline, to_ticktick_due
+
+
+# ── dedup_project_task_cap ───────────────────────────────────────────────
+def test_dedup_project_task_cap_default_has_headroom_over_known_inbox_size():
+    # 2026-08-04 incident: the cap (200) sat BELOW the real Inbox project size
+    # (221 and growing), so real tasks silently fell out of the semantic-dedup
+    # comparison pool. The default must stay comfortably above any known real
+    # project size — this pins that invariant so a future accidental revert
+    # back to something too small fails loudly here instead of silently in
+    # production.
+    known_inbox_size_2026_08_04 = 221
+    assert Settings().dedup_project_task_cap > known_inbox_size_2026_08_04 * 5
 
 
 def test_date_passes_through_verbatim():

@@ -2,7 +2,12 @@
 
 Reuses qwen_base_url / qwen_api_key — same OpenAI-compatible endpoint. Fails
 soft: any error returns None, so indexing/retrieval degrade gracefully to the
-plain window + summary.
+plain window + summary. This is INTENTIONAL policy (a duplicate TickTick task
+is better than a silently lost one) and must not change — but a silent None
+made "the endpoint really failed" indistinguishable from "the text just wasn't
+similar" from the outside, so every failure is also logged to the
+`embedding_failures` collection (see repositories.record_embedding_failure)
+for visibility, without altering the fail-soft return.
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import logging
 
 from openai import AsyncOpenAI
 
+from . import repositories as repo
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -33,6 +39,10 @@ async def embed(texts: list[str]) -> list[list[float]] | None:
     try:
         resp = await _get_client().embeddings.create(model=s.embed_model, input=texts)
         return [d.embedding for d in resp.data]
-    except Exception:  # noqa: BLE001 — fail soft
+    except Exception as exc:  # noqa: BLE001 — fail soft
         logger.warning("Embedding failed", exc_info=True)
+        try:
+            await repo.record_embedding_failure(f"{type(exc).__name__}: {exc}", len(texts))
+        except Exception:  # noqa: BLE001 — diagnostics must never break fail-soft
+            logger.debug("Failed to record embedding failure", exc_info=True)
         return None

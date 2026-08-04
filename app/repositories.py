@@ -279,6 +279,33 @@ async def store_task_vectors(scope: str, items: list[dict[str, Any]]) -> None:
     await db.task_vectors.bulk_write(ops, ordered=False)
 
 
+# ---------------------------------------------------------------------------
+# embedding_failures — visibility into embed()'s fail-soft path
+# (app/embeddings.py). embed() deliberately swallows every error and returns
+# None so the pipeline degrades to exact-hash dedup instead of crashing — but
+# that made "the embedding endpoint really failed this call" indistinguishable
+# from "the endpoint worked and the text just wasn't similar" when looking at
+# dedup misses from the outside. This collection makes the FAILURE RATE
+# measurable without touching that fail-soft behavior: one row per failed
+# embed() call. Thin insert by design (mirrors insert_audit_record) — the
+# caller wraps this in its own try/except so a Mongo hiccup here can never
+# turn a fail-soft embedding failure into a hard pipeline crash.
+# ---------------------------------------------------------------------------
+
+async def record_embedding_failure(error: str, text_count: int) -> None:
+    """Append one row: an embed() call failed.
+
+    `error` is a short "ExceptionType: message" string; `text_count` is how
+    many texts were being embedded in that call (so volume-of-impact is
+    visible alongside frequency)."""
+    db = get_db()
+    await db.embedding_failures.insert_one({
+        "ts": utcnow(),
+        "error": error,
+        "textCount": text_count,
+    })
+
+
 async def append_task_details(chat_id: str, dedup: str, extra: str) -> bool:
     """Append `extra` to a local task's details (enrich, never overwrite).
 

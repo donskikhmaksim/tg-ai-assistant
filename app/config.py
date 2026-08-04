@@ -85,8 +85,24 @@ class Settings(BaseSettings):
     dedup_similarity: float = 0.86
     # Cap on how many of the bound project's tasks are embedded/compared per run,
     # so a huge project can't blow up latency. Stored embeddings are reused across
-    # runs; only new/changed task titles are re-embedded.
-    dedup_project_task_cap: int = 200
+    # runs (task_vectors cache, keyed by TickTick task id); only new/changed task
+    # titles are re-embedded, so raising this cap does NOT re-embed the whole
+    # project every run — it only widens the comparison pool. NOTE: the remote
+    # get_project_tasks MCP call itself already fetches the FULL project
+    # unconditionally (this cap only trims client-side before embedding), so
+    # raising it costs no extra network round-trips either.
+    #
+    # 2026-08-04: was 200, while the actual Inbox project already held 221 tasks
+    # and growing — the cap sat BELOW real project size, so some real tasks
+    # silently dropped out of the dedup comparison pool and produced near-
+    # duplicate TickTick tasks that should have been caught (see the dedup
+    # incident writeup). Bumped to 2000 — ~9x current size — as headroom for a
+    # single owner's personal Inbox for the foreseeable future. If the bound
+    # project ever approaches this number, raise it again; there is no dynamic
+    # "read the project's real size" path today (get_project_tasks doesn't
+    # expose a cheap count-only call), so this constant needs a human to notice
+    # and bump it — it is deliberately generous rather than tight.
+    dedup_project_task_cap: int = 2000
 
     # Qwen via Ollama (Tier 1). OPTIONAL — empty by default so a fresh self-host
     # deploy never tries to reach a localhost Ollama that isn't there. Empty →

@@ -40,6 +40,12 @@ app/pipeline/claim_dedup.py + app/pipeline/claims.py):
                     needs_due_clarification, project, with_whom,
                     needs_clarification, verdict: auto|decision, created_at}
                     — see app/pipeline/claims.py
+  embedding_failures — one row per failed app/embeddings.py::embed() call
+                    {ts, error, textCount}, TTL-expired on `ts` (reuses
+                    audit_ttl_seconds). Makes the embed() fail-soft path's
+                    failure RATE visible (embed() itself still returns None
+                    and never raises into the pipeline) — see
+                    app/repositories.py::record_embedding_failure
 """
 from __future__ import annotations
 
@@ -158,3 +164,17 @@ async def _ensure_indexes(
     # this collection's own idempotency/lookup key (same convention as
     # omi-task-extractor's Repo.ensure_indexes).
     await db.claims.create_index("claim_id", unique=True)
+
+    # `embedding_failures`: visibility into embed()'s fail-soft path (see
+    # app/embeddings.py + app/repositories.py::record_embedding_failure).
+    # TTL on `ts`, reusing audit_ttl_seconds (default 90d) rather than adding
+    # a dedicated setting for a diagnostics-only collection.
+    try:
+        await db.embedding_failures.create_index(
+            [("ts", ASCENDING)], expireAfterSeconds=audit_ttl_seconds, name="embedding_failures_ttl"
+        )
+    except OperationFailure:
+        await db.embedding_failures.drop_index("embedding_failures_ttl")
+        await db.embedding_failures.create_index(
+            [("ts", ASCENDING)], expireAfterSeconds=audit_ttl_seconds, name="embedding_failures_ttl"
+        )

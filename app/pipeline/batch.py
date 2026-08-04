@@ -624,7 +624,7 @@ async def _create_new_tasks(
     sem_mode: str = "on",
     sem_low: float = 0.83,
     sem_high: float = 0.93,
-    sem_cap: int = 200,
+    sem_cap: int = 2000,  # kept in sync with Settings.dedup_project_task_cap's default
     routes: list[dict[str, Any]] | None = None,
 ) -> None:
     if not new_tasks:
