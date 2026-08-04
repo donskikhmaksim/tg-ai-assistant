@@ -93,10 +93,14 @@ class FakeCollection:
         for d in self.docs:
             if _matches(d, query):
                 d.update(update.get("$set", {}))
+                for field in update.get("$unset", {}):
+                    d.pop(field, None)
                 return
         if upsert:
             new_doc = dict(query)
             new_doc.update(update.get("$set", {}))
+            for field in update.get("$unset", {}):
+                new_doc.pop(field, None)
             self.docs.append(new_doc)
 
 
@@ -232,6 +236,53 @@ def test_upsert_signal_repeated_call_updates_in_place_no_duplicate(monkeypatch):
     assert stored["ingested_at"] is not None
 
 
+def test_upsert_signal_unset_removes_stale_triage_and_claimed(monkeypatch):
+    db = _use_fake_db(
+        monkeypatch,
+        signals_docs=[
+            {
+                "source": "telegram", "source_id": "user_1:2026-08-03",
+                "title": "T", "triage": {"verdict": "auto"}, "claimed": True,
+            }
+        ],
+    )
+
+    _run(
+        signals.upsert_signal(
+            {"source": "telegram", "source_id": "user_1:2026-08-03", "title": "T2"},
+            unset=["triage", "claimed"],
+        )
+    )
+
+    stored = db.signals.docs[0]
+    assert stored["title"] == "T2"
+    assert "triage" not in stored
+    assert "claimed" not in stored
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _bucket_changed (pure) — the "should we invalidate triage/claimed" check
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bucket_changed_false_for_brand_new_bucket():
+    assert signals._bucket_changed(None, [1, 2]) is False
+
+
+def test_bucket_changed_false_when_message_ids_identical():
+    existing = {"raw_ref": {"message_ids": [1, 2]}}
+    assert signals._bucket_changed(existing, [1, 2]) is False
+
+
+def test_bucket_changed_true_when_new_messages_appended():
+    existing = {"raw_ref": {"message_ids": [1, 2]}}
+    assert signals._bucket_changed(existing, [1, 2, 3]) is True
+
+
+def test_bucket_changed_true_when_existing_has_no_raw_ref():
+    assert signals._bucket_changed({"title": "T"}, [1]) is True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ingest_telegram_signals
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,6 +351,68 @@ def test_ingest_telegram_signals_reingest_is_idempotent(monkeypatch):
     _run(signals.ingest_telegram_signals(since=now - timedelta(hours=6)))  # re-ingest tick
 
     assert len(db.signals.docs) == 1
+
+
+def test_ingest_telegram_signals_reset_stays_untouched_when_bucket_content_unchanged(monkeypatch):
+    """A re-ingest tick that touches a bucket but finds the SAME message set
+    (e.g. a sibling chat's new message advanced the cursor, or the tick just
+    re-ran) must NOT reset an already-computed triage/claimed — only an
+    actual content change should invalidate them."""
+    _use_utc_settings(monkeypatch)
+    now = _dt(0)
+    db = _use_fake_db(
+        monkeypatch,
+        raw_messages=[_msg("user_1", _dt(0, 9), "hi", 1)],
+        chat_state=[{"chatId": "user_1", "title": "T"}],
+        signals_docs=[
+            {
+                "source": "telegram", "source_id": f"user_1:{_dt(0).date().isoformat()}",
+                "raw_ref": {"chat_id": "user_1", "date": _dt(0).date().isoformat(), "message_ids": [1]},
+                "triage": {"verdict": "auto"}, "claimed": True,
+            }
+        ],
+    )
+
+    _run(signals.ingest_telegram_signals(since=now - timedelta(hours=6)))
+
+    stored = db.signals.docs[0]
+    assert stored["triage"] == {"verdict": "auto"}
+    assert stored["claimed"] is True
+
+
+def test_ingest_telegram_signals_resets_stale_triage_and_claimed_on_new_message(monkeypatch):
+    """The correctness fix under test (see app/signals.py's "Stale
+    triage/claimed invalidation" docstring section): a bucket already
+    triaged+claimed earlier today must have BOTH flags cleared once a NEW
+    message shows up in that same (chat, day) bucket, so the next
+    triage/claims tick re-evaluates it instead of silently ignoring
+    everything discussed after the first tick of the day."""
+    _use_utc_settings(monkeypatch)
+    now = _dt(0)
+    today = _dt(0).date().isoformat()
+    db = _use_fake_db(
+        monkeypatch,
+        raw_messages=[
+            _msg("user_1", _dt(0, 9), "рано", 1),
+            _msg("user_1", _dt(0, 20), "новое сообщение", 2),  # arrived after triage/claims
+        ],
+        chat_state=[{"chatId": "user_1", "title": "T"}],
+        signals_docs=[
+            {
+                "source": "telegram", "source_id": f"user_1:{today}",
+                "raw_ref": {"chat_id": "user_1", "date": today, "message_ids": [1]},
+                "triage": {"verdict": "auto", "rubric_version": "v0"}, "claimed": True,
+            }
+        ],
+    )
+
+    count = _run(signals.ingest_telegram_signals(since=now - timedelta(hours=1)))
+
+    assert count == 1
+    stored = db.signals.docs[0]
+    assert "triage" not in stored
+    assert "claimed" not in stored
+    assert stored["raw_ref"]["message_ids"] == [1, 2]  # full bucket still rebuilt correctly
 
 
 def test_ingest_telegram_signals_multiple_chats_and_days_produce_distinct_buckets(monkeypatch):

@@ -66,6 +66,26 @@ messages — and it is the SAME accepted tradeoff the omi reference's gmail
 adapter documents: "re-running the ingest tick... re-fetches the whole
 [bucket] every time — wasteful but harmless, since upsert_signal's (source,
 source_id) key makes every re-ingest idempotent."
+
+── Stale triage/claimed invalidation ───────────────────────────────────────
+
+A whole-document $set rebuild is idempotent for signals.py's OWN fields, but
+`triage` (app/pipeline/triage.py) and `claimed` (app/pipeline/claims.py) are
+written by LATER pipeline stages directly onto the same signal doc, and a
+plain $set never touches a field it doesn't mention. Left alone, that means:
+a bucket triaged/claimed once today, then re-ingested after MORE messages
+arrive in that same (chat, day) bucket, would keep its now-stale
+`triage.verdict`/`claimed: true` — get_pending_triage_signals and
+get_claimable_signals would silently skip re-evaluating it, so anything
+discussed after the day's first triage/claims tick would never reach the
+task queue until the calendar day rolls over and a fresh bucket starts.
+
+`ingest_telegram_signals` guards against this itself: before each upsert it
+compares the freshly rebuilt bucket's message_ids against what was stored on
+the previous ingest of that source_id (`_bucket_changed`), and when they
+differ it passes `unset=["triage", "claimed"]` to upsert_signal — the same
+call that does the $set — so the next triage/claims tick sees the bucket as
+unevaluated again.
 """
 from __future__ import annotations
 
@@ -90,21 +110,65 @@ _SUMMARY_MAX_CHARS = 4000
 # ── shared upsert ────────────────────────────────────────────────────────
 
 
-async def upsert_signal(doc: dict[str, Any]) -> None:
+async def upsert_signal(doc: dict[str, Any], unset: list[str] | None = None) -> None:
     """Upsert one signal by the idempotency key (source, source_id) — see
     app/db.py::_ensure_indexes for the backing unique index.
 
     Re-ingesting the same source_id overwrites the stored fields (a chat/day
     bucket accrues new messages over the day) and refreshes `ingested_at` —
-    it never inserts a duplicate."""
+    it never inserts a duplicate.
+
+    `unset` — field names to remove from the stored doc in the SAME update
+    (e.g. ["triage", "claimed"]). Used by ingest_telegram_signals (see
+    _bucket_changed) to invalidate a bucket's already-computed
+    triage.verdict/claimed flags when new messages arrive in an
+    already-evaluated (chat, day) bucket — without this, a re-ingest's plain
+    $set never touches fields it doesn't mention, so a stale verdict/flag
+    from BEFORE the new messages would keep hiding them from
+    get_pending_triage_signals/get_claimable_signals until the calendar day
+    rolls over and a fresh bucket starts."""
     payload = dict(doc)
     payload["ingested_at"] = repo.utcnow()
     db = get_db()
+    update: dict[str, Any] = {"$set": payload}
+    if unset:
+        update["$unset"] = {field: "" for field in unset}
     await db.signals.update_one(
         {"source": payload["source"], "source_id": payload["source_id"]},
-        {"$set": payload},
+        update,
         upsert=True,
     )
+
+
+# Fields reset (via upsert_signal's `unset`) whenever a re-ingested bucket's
+# message set has changed since it was last evaluated — see
+# _bucket_changed/ingest_telegram_signals. Both are denormalized
+# pipeline-stage outputs written by later stages (app/pipeline/triage.py,
+# app/pipeline/claims.py) directly onto the signal doc; signals.py owns
+# invalidating them because it's the only stage that knows a bucket's
+# content actually changed.
+_STALE_ON_CONTENT_CHANGE = ["triage", "claimed"]
+
+
+def _bucket_changed(existing: dict[str, Any] | None, new_message_ids: list[int]) -> bool:
+    """True if `new_message_ids` (the freshly rebuilt full-day bucket) differs
+    from what was stored on the PREVIOUS ingest of this same (chat, day)
+    signal (`existing`, a prior `signals` doc or None for a brand-new
+    bucket).
+
+    raw_messages is an append-only stream (no edit/delete path in this repo
+    — see app/signals.py's module docstring), so message_ids only ever
+    grows; a straight list comparison (order is deterministic — both sides
+    come from the same date-sorted rebuild) is enough to detect "content
+    changed since the last triage/claims evaluation" without needing a
+    separate content hash.
+
+    False for a brand-new bucket (`existing is None`) — there is no stale
+    triage/claimed to invalidate yet."""
+    if existing is None:
+        return False
+    old_ids = (existing.get("raw_ref") or {}).get("message_ids") or []
+    return list(old_ids) != list(new_message_ids)
 
 
 # ── Telegram adapter ────────────────────────────────────────────────────
@@ -212,6 +276,15 @@ async def ingest_telegram_signals(since: datetime) -> int:
                 "ingest_telegram_signals: failed to build signal for %s/%s", chat_id, day
             )
             continue
-        await upsert_signal(signal_doc)
+        existing = await db.signals.find_one(
+            {"source": "telegram", "source_id": signal_doc["source_id"]},
+            {"raw_ref": 1},
+        )
+        unset = (
+            _STALE_ON_CONTENT_CHANGE
+            if _bucket_changed(existing, signal_doc["raw_ref"]["message_ids"])
+            else None
+        )
+        await upsert_signal(signal_doc, unset=unset)
         count += 1
     return count
