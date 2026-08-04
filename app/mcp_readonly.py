@@ -33,6 +33,12 @@ Five tools:
                         signals+triage layer): score/category/verdict per
                         chat/day activity bucket, optionally filtered to one
                         verdict ("drop"/"auto"/"decision").
+  get_claims_queue     — one layer further down the pipeline than
+                        get_triage_queue: ready-made task CARDS (see
+                        app/pipeline/claims.py, app/pipeline/claim_dedup.py
+                        — a port of omi-task-extractor's claims layer), one
+                        per triaged (+ cross-source-deduped, once a second
+                        signal source exists) signal or signal group.
   submit_triage_feedback — THE ONE WRITE TOOL in this otherwise strictly
                         read-only server. Deliberate, narrow exception: it
                         does not touch TickTick or any other external
@@ -90,7 +96,8 @@ mcp = FastMCP(
         "get_daily_bundle for a single-call daily snapshot; fall back to "
         "list_conversations / list_tasks directly for a wider or more "
         "specific range; use get_triage_queue for the drop/auto/decision "
-        "triage review."
+        "triage review, or get_claims_queue for ready-made task cards one "
+        "layer further down the pipeline."
     ),
     json_response=True,
 )
@@ -260,6 +267,37 @@ async def _triage_queue_items(since: datetime, verdict: str | None) -> list[dict
     return [_signal_triage_item(d) async for d in cursor]
 
 
+def _claim_queue_item(doc: dict[str, Any]) -> dict[str, Any]:
+    """One get_claims_queue output item from a raw `claims` doc — see
+    get_claims_queue's docstring for field meanings."""
+    return {
+        "claim_id": doc.get("claim_id"),
+        "signal_ids": doc.get("signal_ids") or [],
+        "title": doc.get("title"),
+        "subtasks": doc.get("subtasks") or [],
+        "description": doc.get("description"),
+        "due_date": doc.get("due_date"),
+        "needs_due_clarification": doc.get("needs_due_clarification"),
+        "project": doc.get("project"),
+        "with_whom": doc.get("with_whom"),
+        "needs_clarification": doc.get("needs_clarification"),
+        "verdict": doc.get("verdict"),
+        "created_at": _iso(doc.get("created_at")),
+    }
+
+
+async def _claims_queue_items(since: datetime, verdict: str | None) -> list[dict[str, Any]]:
+    """get_claims_queue's full body, factored out for the same reason
+    _triage_queue_items is: keeps the Mongo query + shaping testable/
+    reusable independent of the MCP tool wiring."""
+    db = get_db()
+    filt: dict[str, Any] = {"created_at": {"$gte": since}}
+    if verdict:
+        filt["verdict"] = verdict
+    cursor = db.claims.find(filt).sort("created_at", -1)
+    return [_claim_queue_item(d) async for d in cursor]
+
+
 async def list_conversations(days_back: int = 3, chat_id: int | None = None) -> list[dict[str, Any]]:
     """Raw conversation transcripts for the last `days_back` CALENDAR days
     (today counts as one; NOT "active days" — every calendar day in the
@@ -422,6 +460,54 @@ async def get_triage_queue(
     return await _triage_queue_items(since, verdict)
 
 
+async def get_claims_queue(
+    verdict: str | None = None, days_back: int = 3
+) -> list[dict[str, Any]]:
+    """Ready-made claim CARDS (see app/pipeline/claims.py) from the last
+    `days_back` calendar days — one layer further down the pipeline than
+    get_triage_queue: dedup (app/pipeline/claim_dedup.py) + an LLM-authored
+    card per triaged signal or cross-source-matched signal group. This is
+    what an external morning review ultimately acts on.
+
+    `verdict` — optional filter to exactly one of "auto" / "decision"
+    (never "drop" — dropped signals never reach the claims layer at all,
+    see app/pipeline/claims.py's module docstring). None (default) returns
+    both.
+
+    Each returned item:
+      claim_id                — stable id for this card.
+      signal_ids               — f"{source}:{source_id}" for every
+                                 signal this card is evidence for (one, or
+                                 several when cross-source corroborated —
+                                 see app/pipeline/claim_dedup.py; today this
+                                 repo has only one signal source, so every
+                                 card carries exactly one signal_id until a
+                                 second source is added).
+      title                     — imperative-infinitive title, 4-9 words.
+      subtasks                  — [] unless the card genuinely bundles 2+
+                                 distinct actions.
+      description                — fixed-order card body (source quote,
+                                 context, participants, open questions).
+      due_date                   — absolute date/time, or null when the
+                                 source named none — never invented.
+      needs_due_clarification    — true if a deadline was hinted but
+                                 ambiguous.
+      project                    — a TickTick project name, or "unsorted"
+                                 when nothing fit.
+      with_whom                  — raw "with whom" string as it was said,
+                                 or null.
+      needs_clarification        — true if something about this card is
+                                 genuinely ambiguous.
+      verdict                    — "auto" | "decision", inherited from the
+                                 member signal(s)' triage verdict.
+      created_at                  — ISO 8601, when this card was generated.
+
+    Sorted newest-first by created_at.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days_back)
+    return await _claims_queue_items(since, verdict)
+
+
 async def submit_triage_feedback(
     signal_id: str, verdict: str, note: str | None = None
 ) -> dict[str, Any]:
@@ -470,6 +556,7 @@ mcp.tool(name="list_conversations")(list_conversations)
 mcp.tool(name="list_tasks")(list_tasks)
 mcp.tool(name="get_daily_bundle")(get_daily_bundle)
 mcp.tool(name="get_triage_queue")(get_triage_queue)
+mcp.tool(name="get_claims_queue")(get_claims_queue)
 mcp.tool(name="submit_triage_feedback")(submit_triage_feedback)
 
 
@@ -598,5 +685,5 @@ def register_routes(app: web.Application) -> None:
     # Deliberately not logging the path — it contains the secret.
     logger.info(
         "Read-only MCP server mounted (tools: list_conversations, list_tasks, "
-        "get_daily_bundle, get_triage_queue, submit_triage_feedback)"
+        "get_daily_bundle, get_triage_queue, get_claims_queue, submit_triage_feedback)"
     )

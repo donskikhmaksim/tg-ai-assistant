@@ -14,6 +14,7 @@ from .backup.mongo_backup import run_mongo_backup
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
+from .pipeline.claims import run_claims_tick
 from .pipeline.summary import run_daily_summary
 from .pipeline.triage import run_triage_tick
 from .pipeline.watchdog import run_watchdog
@@ -87,6 +88,20 @@ async def main() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("triage tick failed")
 
+    async def claims_job() -> None:
+        """Turn triaged-but-not-yet-claimed `signals` (verdict "auto"/
+        "decision") into `claims` cards (see app/pipeline/claims.py):
+        cross-source dedup + one batched Claude call per tick. Runs AFTER
+        triage_job in pipeline order — it only ever consumes signals
+        triage_job has already scored, never races it (no shared cursor;
+        "claimed" is a per-signal flag, same idempotent-tick shape as
+        triage_job itself)."""
+        try:
+            count = await run_claims_tick(settings)
+            logger.info("Claims: wrote %d claim(s)", count)
+        except Exception:  # noqa: BLE001
+            logger.exception("claims tick failed")
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         run_batch,
@@ -112,9 +127,19 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        claims_job,
+        "interval",
+        minutes=settings.claims_interval_minutes,
+        id="claims",
+        max_instances=1,
+        coalesce=True,
+    )
     logger.info(
-        "Signals+triage scheduled: ingest every %d min, triage every %d min",
+        "Signals+triage+claims scheduled: ingest every %d min, triage every %d min, "
+        "claims every %d min",
         settings.signals_ingest_interval_minutes, settings.triage_interval_minutes,
+        settings.claims_interval_minutes,
     )
     scheduler.start()
     logger.info("Batch scheduler started: every %d min", settings.batch_interval_min)

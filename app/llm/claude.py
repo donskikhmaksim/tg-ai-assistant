@@ -553,6 +553,73 @@ async def judge_same_task(a: str, b: str) -> bool | None:
         return None
 
 
+# ── Cross-source signal judge (ports omi-task-extractor's app/llm/claude.py::
+# judge_same_signal — see app/pipeline/claim_dedup.py for the caller/flow) ──
+# A cheap yes/no: are two SIGNALS (not tasks — see judge_same_task above for
+# the task-title judge) about the same underlying real-world matter, caught
+# from two different sources? Same fail-safe contract as judge_same_task:
+# any error/None means "distinct", never merge on doubt.
+
+_SIGNAL_JUDGE_SYSTEM = (
+    "You compare two SIGNALS — each is a short blurb (title + summary) of a "
+    "chunk of activity from a personal task-tracking pipeline (e.g. a "
+    "Telegram chat's day of messages, or a chunk from another source). "
+    "Decide whether they are ABOUT THE SAME underlying real-world matter — "
+    "the same commitment, request, or event — merely caught from two "
+    "different sources (e.g. something was discussed in one place, then "
+    "separately followed up on elsewhere about that SAME thing).\n"
+    "A shared topic, person, or company is NOT enough on its own: two "
+    "signals about the same person/company/project but a DIFFERENT "
+    "concrete matter are NOT the same signal. Only say yes when it is "
+    "genuinely the same underlying thing, seen twice. Answer with a single "
+    "word: yes or no."
+)
+
+
+async def judge_same_signal(a: str, b: str) -> bool | None:
+    """True if `a` and `b` (each a signal's title+summary text) are the same
+    underlying matter, False if distinct, None when the judge is
+    unavailable/errors. Callers MUST treat None as distinct — same fail-safe
+    contract as judge_same_task."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return None
+    s = get_settings()
+    user = f"Signal A:\n{a}\n\nSignal B:\n{b}\n\nSame underlying matter? Answer yes or no."
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": _SIGNAL_JUDGE_SYSTEM,
+                "prompt": user,
+                "model": s.dedup_judge_model,
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=min(s.claude_cli_timeout, 60)) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                return None
+            return _parse_yes_no(data.get("result") or "")
+
+        model = _JUDGE_API_MODELS.get(s.dedup_judge_model)
+        if model is None:
+            # "opus" → the configured extraction model; anything else → literal id.
+            model = s.anthropic_model if s.dedup_judge_model == "opus" else s.dedup_judge_model
+        resp = await _get_client().messages.create(
+            model=model,
+            max_tokens=5,
+            thinking={"type": "disabled"},
+            system=_SIGNAL_JUDGE_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = next((blk.text for blk in resp.content if blk.type == "text"), "")
+        return _parse_yes_no(text)
+    except Exception:  # noqa: BLE001 — fail safe: unknown → caller treats as distinct
+        logger.warning("judge_same_signal failed", exc_info=True)
+        return None
+
+
 # ── Final reality check (within-window) ─────────────────────────────────────
 # `status_updates` above already tracks a task across WINDOWS — it matches
 # against the memory's open-task list, built from PRIOR runs. It structurally
@@ -877,6 +944,206 @@ async def score_triage_batch(items: list[dict[str, Any]]) -> list[dict[str, Any]
         return verdicts if isinstance(verdicts, list) else []
     except Exception:  # noqa: BLE001 — fail-open: [] means "nothing scored this tick"
         logger.warning("score_triage_batch failed", exc_info=True)
+        return []
+
+
+# ── Claims batch card generation (ports omi-task-extractor's
+# app/llm/claude.py::generate_claims_batch — see app/pipeline/claims.py for
+# the caller/flow) ─────────────────────────────────────────────────────────
+# app/pipeline/claims.py turns each dedup GROUP (one or more corroborating
+# signals — see app/pipeline/claim_dedup.py) into ONE user-facing task card,
+# batched the same way score_triage_batch batches triage scoring: one call
+# for the whole tick's groups, never one call per group.
+
+CLAIMS_SYSTEM = (
+    "You turn GROUPS of SIGNALS — each signal is a blurb (title + summary) "
+    "of a chunk of activity from a personal task-tracking pipeline (e.g. a "
+    "Telegram chat's day of messages), evidence that something needs doing "
+    "— into a single task CARD for a personal task manager. A group may "
+    "hold one signal, or several corroborating signals from different "
+    "sources about the SAME underlying matter.\n\n"
+    "Content may be in Russian or English — write the card in the SAME "
+    "language as the source signal(s).\n\n"
+    "For EACH group produce:\n"
+    "  title — an imperative-infinitive VERB + OBJECT + a DISTINGUISHER "
+    "(what makes this one specific), 4-9 words total. No hedging filler "
+    "like \"надо бы\"/\"нужно бы\" — start directly with the action.\n"
+    "  subtasks — ONLY when the group genuinely contains 2+ DIFFERENT "
+    "actions separated by time or by who does them (e.g. \"send the file\" "
+    "AND, separately, \"schedule a follow-up call\"). A single action, "
+    "however long or detailed the source text, gets an EMPTY subtasks "
+    "list — never split one action into artificial steps.\n"
+    "  description — FIXED block order, each block its own line, EMPTY "
+    "blocks OMITTED entirely (never write a block with nothing in it): "
+    "(1) a short quote or close paraphrase of the source phrase, who said/"
+    "wrote it and when; (2) context/why, if the source actually explains "
+    "it; (3) participants, ONLY if names were actually mentioned; (4) open "
+    "questions, if anything is genuinely ambiguous. Hard cap 60-80 words "
+    "total across the whole description — trim, never invent, to fit.\n"
+    "  due_date — an absolute date/time ONLY when the source signal itself "
+    "names a deadline, explicitly or via a clearly resolvable relative "
+    "expression (\"next Friday\", \"через неделю\") anchored to that "
+    "signal's own timestamp (given below, per signal). Converting a "
+    "resolvable relative expression to an absolute date is REQUIRED — but "
+    "you MUST also keep the ORIGINAL phrase visible in the description "
+    "(block 1) so a human can double-check the conversion. NEVER invent a "
+    "date that the source did not imply at all — leave due_date null "
+    "instead of guessing.\n"
+    "  needs_due_clarification — true when the source HINTS at a deadline "
+    "but it is genuinely ambiguous which date is meant (e.g. \"на "
+    "следующей неделе\" with no anchor day, or two conflicting dates "
+    "mentioned) — false otherwise.\n"
+    "  project — pick the SINGLE best-fitting name from the AVAILABLE "
+    "PROJECTS list below, EXACTLY as written there, by topic; if truly "
+    "nothing fits, or no projects are listed, use exactly \"unsorted\".\n"
+    "  with_whom — the RAW string naming who this involves, worded AS THE "
+    "SOURCE SAID IT (a name, a role, \"клиент\", whatever was actually "
+    "used) — do NOT resolve it to a real identity, do NOT invent a name "
+    "that wasn't said. null when nobody was named.\n"
+    "  needs_clarification — true when who/what/scope is genuinely "
+    "ambiguous in a way that would block acting on this card as-is, false "
+    "otherwise.\n\n"
+    "NEVER invent a date, amount, or name that is not actually present in "
+    "the given signal text(s) — for any field you cannot ground in the "
+    "source text, prefer null/false and let a human fill the gap.\n\n"
+    "Return exactly one card per group, using its given 0-based index."
+)
+
+CLAIMS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cards": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "subtasks": {"type": "array", "items": {"type": "string"}},
+                    "description": {"type": "string"},
+                    "due_date": {"type": ["string", "null"]},
+                    "needs_due_clarification": {"type": "boolean"},
+                    "project": {"type": "string"},
+                    "with_whom": {"type": ["string", "null"]},
+                    "needs_clarification": {"type": "boolean"},
+                },
+                "required": [
+                    "index",
+                    "title",
+                    "subtasks",
+                    "description",
+                    "due_date",
+                    "needs_due_clarification",
+                    "project",
+                    "with_whom",
+                    "needs_clarification",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["cards"],
+    "additionalProperties": False,
+}
+
+_CLAIMS_MAX_TOKENS = 6000
+
+_CLAIMS_CLI_INSTRUCTION = (
+    "\n\n# OUTPUT FORMAT (STRICT)\n"
+    "Return ONLY a single JSON object that validates against this JSON Schema. "
+    "No prose, no explanation, no markdown, no code fences — just the raw JSON object.\n"
+    "JSON Schema:\n" + json.dumps(CLAIMS_SCHEMA, ensure_ascii=False)
+)
+
+
+def _claim_group_line(index: int, group: list[dict[str, Any]]) -> str:
+    lines = [f"{index}. GROUP ({len(group)} signal(s)):"]
+    for sig in group:
+        parts = [f"   - [{sig.get('source') or '?'}] {sig.get('title') or '(no title)'}"]
+        if sig.get("ts_start"):
+            parts.append(f"     when: {sig['ts_start']}")
+        participants = sig.get("participants_raw") or []
+        if participants:
+            parts.append(f"     participants: {', '.join(participants)}")
+        if sig.get("summary"):
+            parts.append(f"     summary: {sig['summary']}")
+        lines.append("\n".join(parts))
+    return "\n".join(lines)
+
+
+async def generate_claims_batch(
+    groups: list[list[dict[str, Any]]], routing_projects: list[str]
+) -> list[dict[str, Any]]:
+    """One Claude call generating a card for EVERY group at once — same
+    batching principle as score_triage_batch (one call per tick, not one per
+    group).
+
+    `groups`: list of signal-item-dict lists ({title, summary,
+    participants_raw, source, ts_start} — same per-signal shape
+    triage.score_signals builds for score_triage_batch). `routing_projects`:
+    existing TickTick project names (app/pipeline/claims.py fetches them via
+    TickTickMCP.get_projects, same as app/pipeline/batch.py's routing) —
+    "unsorted" is ALWAYS an implicit extra option, never included in this
+    list.
+
+    Returns the raw list of cards the model produced — [{index, title,
+    subtasks, description, due_date, needs_due_clarification, project,
+    with_whom, needs_clarification}, ...], NOT guaranteed to have one entry
+    per input group (same index-matching contract as score_triage_batch).
+    Returns [] on ANY failure — fail-open, the caller must treat a missing
+    index as "not generated this tick", never invent a card.
+    """
+    if not groups:
+        return []
+    s = get_settings()
+    projects_block = (
+        "\n# AVAILABLE PROJECTS\n" + "\n".join(f'- "{p}"' for p in routing_projects) + "\n"
+        if routing_projects
+        else '\n# AVAILABLE PROJECTS\n(none configured — every card should use "unsorted")\n'
+    )
+    user = (
+        projects_block
+        + "\n# GROUPS\n"
+        + "\n".join(_claim_group_line(i, g) for i, g in enumerate(groups))
+        + "\n"
+    )
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": CLAIMS_SYSTEM,
+                "prompt": user + _CLAIMS_CLI_INSTRUCTION,
+                "model": (s.claims_model or s.claude_cli_model),
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
+            raw = _parse_json_loose(data.get("result") or "")
+        else:
+            resp = await _get_client().messages.create(
+                model=resolve_api_model(s.claims_model),
+                max_tokens=_CLAIMS_MAX_TOKENS,
+                thinking={"type": "adaptive"},
+                output_config={
+                    "effort": "medium",
+                    "format": {"type": "json_schema", "schema": CLAIMS_SCHEMA},
+                },
+                system=[
+                    {"type": "text", "text": CLAIMS_SYSTEM, "cache_control": {"type": "ephemeral"}}
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), None)
+            if text is None:
+                raise ValueError(f"no text block (stop_reason={resp.stop_reason})")
+            raw = json.loads(text)
+        cards = raw.get("cards")
+        return cards if isinstance(cards, list) else []
+    except Exception:  # noqa: BLE001 — fail-open: [] means "nothing generated this tick"
+        logger.warning("generate_claims_batch failed", exc_info=True)
         return []
 
 

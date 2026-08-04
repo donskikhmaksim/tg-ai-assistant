@@ -63,12 +63,13 @@ log = logging.getLogger(__name__)
 RUBRIC_VERSION = "v0"
 
 # Score bonus for a signal independently corroborated by more than one
-# source. NOT WIRED UP in this repo — there is only one source (telegram)
-# and no cross-source dedup layer here (the omi reference's boost is fed by
-# its claims-layer cross-source matcher, which this port deliberately does
-# not carry over — see app/signals.py module docstring's scope note). Kept
-# as a documented no-op hook, same forward-compat shape as the reference, in
-# case a second signal source is ever added to this repo.
+# source. WIRED UP (as of app/pipeline/claim_dedup.py) but still INERT in
+# practice today: this repo has only one signal source (telegram), and
+# claim_dedup.group_signals only ever writes matched_signal_ids when two
+# signals come from DIFFERENT sources — a condition that can never hold with
+# a single source. `_has_multi_source_match` below reads the real field, so
+# the moment a second signal source is added (e.g. an email adapter) this
+# boost starts firing with no further code changes here.
 _MULTI_SOURCE_BOOST = 0.15
 
 

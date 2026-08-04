@@ -19,17 +19,27 @@ Manifest-policy admin (Phase 1 — storage only, see app/policy/):
                     per-tool/class enforcement-tier overrides. No index needed
                     beyond the default _id index (one doc today).
 
-Signals + triage (ports omi-task-extractor's signals/triage layer — see
-app/signals.py + app/pipeline/triage.py):
+Signals + triage + claims (ports omi-task-extractor's signals/triage/claims
+layer — see app/signals.py + app/pipeline/triage.py +
+app/pipeline/claim_dedup.py + app/pipeline/claims.py):
   signals         — unified feed, one record per Telegram chat's local-day
                     activity bucket: {source: "telegram", source_id (unique
                     compound with source), ts_start, ts_end, title, summary,
                     participants_raw, ingested_at, raw_ref, triage: {score,
                     category, verdict, reason, rubric_version, scored_at}
-                    (optional, written by the triage stage)}
+                    (optional, written by the triage stage), matched_signal_
+                    ids: list[str] (optional, written by
+                    app/pipeline/claim_dedup.py's cross-source dedup),
+                    claimed: bool (optional, written by
+                    app/pipeline/claims.py once folded into a `claims` doc)}
   triage_feedback — write-only human-feedback log {signal_id, human_verdict:
                     approved|rejected|pulled_from_dropped, note, created_at}
                     — see app/pipeline/triage.py::record_triage_feedback
+  claims          — user-facing task cards {claim_id (unique), signal_ids,
+                    title, subtasks, description, due_date,
+                    needs_due_clarification, project, with_whom,
+                    needs_clarification, verdict: auto|decision, created_at}
+                    — see app/pipeline/claims.py
 """
 from __future__ import annotations
 
@@ -144,3 +154,7 @@ async def _ensure_indexes(
     # signal it's about — no uniqueness constraint (a signal can accrue more
     # than one feedback row over time).
     await db.triage_feedback.create_index([("signal_id", ASCENDING)])
+    # `claims`: user-facing task cards (app/pipeline/claims.py) — claim_id is
+    # this collection's own idempotency/lookup key (same convention as
+    # omi-task-extractor's Repo.ensure_indexes).
+    await db.claims.create_index("claim_id", unique=True)

@@ -317,9 +317,12 @@ class Settings(BaseSettings):
     # already established by get_daily_bundle's active-day scanning
     # (app/mcp_readonly.py) is reused as the natural signal unit) ahead of a
     # cheap batched triage pass that scores each into drop/auto/decision
-    # BEFORE anything becomes a task-extraction candidate. Not yet consumed
-    # by app/pipeline/batch.py — this is the triage layer only, same scope
-    # boundary as the omi port (claims/dedup is a separate later step).
+    # BEFORE anything becomes a task-extraction candidate. Not consumed by
+    # app/pipeline/batch.py — the signals/triage/claims pipeline is a
+    # SEPARATE surface (read via app/mcp_readonly.py's get_triage_queue /
+    # get_claims_queue) from the existing extraction pipeline that creates
+    # real TickTick tasks; see app/pipeline/claims.py for the claims layer
+    # built on top of triage (claim_dedup + card generation).
     #
     # How often app/signals.py::ingest_telegram_signals folds fresh
     # raw_messages into `signals`, minutes.
@@ -340,6 +343,37 @@ class Settings(BaseSettings):
     # How many days back run_triage_tick looks for signals with no `triage`
     # field yet (or scored under a stale rubric_version) each tick.
     triage_lookback_days: int = 3
+
+    # ─── Claims layer (ports omi-task-extractor's app/pipeline/claim_dedup.py
+    # + app/pipeline/claims.py — see those modules' docstrings for the
+    # shared architecture, and claim_dedup.py's module docstring specifically
+    # for why cross-source dedup is ported/tested even though this repo has
+    # only ONE signal source today). Turns triaged (verdict != "drop")
+    # signals into user-facing task cards in the `claims` collection, read
+    # via get_claims_queue (app/mcp_readonly.py).
+    #
+    # Cross-source dedup thresholds (app/pipeline/claim_dedup.py): cosine on
+    # title+summary embeddings, cross-source pairs only, within a 72h window
+    # (see claim_dedup.DEDUP_WINDOW_HOURS). Deliberately SEPARATE from
+    # DEDUP_LOW/DEDUP_HIGH above (task-title near-duplicate dedup) — the
+    # compared text is different in kind: two SHORT, near-identically-phrased
+    # task titles vs. two FULL signal blurbs describing the same real-world
+    # matter in very different vocabulary. Genuinely-the-same cross-source
+    # signals are expected to sit LOWER on the cosine scale than
+    # near-duplicate task titles, hence lower thresholds here.
+    claim_dedup_low: float = 0.75
+    claim_dedup_high: float = 0.90
+    # How many days back run_claims_tick looks for claimable signals each tick.
+    claims_lookback_days: int = 3
+    # How often claims_job (app/main.py) runs, minutes. Runs AFTER triage_job
+    # in pipeline order (it only ever consumes already-triaged signals).
+    claims_interval_minutes: int = 15
+    # Model alias for the batched claim-card generation call (see
+    # app/llm/claude.py::generate_claims_batch) — same opus|sonnet|haiku
+    # scheme as extract_model/triage_model/dedup_judge_model. Card
+    # copywriting needs more care than triage's cheap classification, so
+    # sonnet by default (same tier as extraction).
+    claims_model: str = "sonnet"
 
     # ─── Manifest-policy admin (Phase 1 — storage + Mini App UI only) ────
     # Per-tool tri-state enforcement policy (hard_manifest | soft_guard | off)

@@ -519,7 +519,7 @@ def test_mixed_case_headers_tools_list_exposes_all_readonly_tools(monkeypatch):
             names = {t["name"] for t in payload["result"]["tools"]}
             assert names == {
                 "list_conversations", "list_tasks", "get_daily_bundle",
-                "get_triage_queue", "submit_triage_feedback",
+                "get_triage_queue", "get_claims_queue", "submit_triage_feedback",
             }
 
     _run(go())
