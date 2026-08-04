@@ -24,6 +24,7 @@ from aiohttp import web
 
 from .. import repositories as repo
 from ..config import get_settings
+from ..mcp_readonly import register_routes as register_mcp_readonly_routes
 from ..onboarding import ai_help
 from ..policy.catalog import CLASSES, TIERS, load_catalog, merged_defaults, resolve_tier
 from ..telegram.notify import group_watch_announcement
@@ -939,6 +940,7 @@ def build_app(bot: Any) -> web.Application:
             web.get("/policy", api_policy_pull),
         ]
     )
+    register_mcp_readonly_routes(app)
     return app
 
 

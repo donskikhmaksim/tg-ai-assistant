@@ -297,6 +297,17 @@ class Settings(BaseSettings):
     backup_hour: int = 4              # local hour (default_timezone) the backup runs
     backup_retention_days: int = 30   # prune objects under the prefix older than this
 
+    # ─── Read-only MCP server (Streamable HTTP) for an external MCP client ──
+    # The mirror-image role of ticktick_mcp_url above: THIS app is normally an
+    # MCP CLIENT (it calls out to ticktick-mcp to write tasks); this is the one
+    # place it acts as an MCP SERVER, exposing conversation history + already-
+    # extracted tasks READ-ONLY to an external client (e.g. "Claude Cowork",
+    # which owns its own write-capable TickTick MCP connector separately — this
+    # server never writes anything). Mounted at /mcp/<MCP_READONLY_SECRET>,
+    # same path-secret pattern as ticktick_mcp_url (see app/mcp_readonly.py).
+    # Fail-open: empty secret -> the route is not mounted at all.
+    mcp_readonly_secret: str = ""
+
     # ─── Manifest-policy admin (Phase 1 — storage + Mini App UI only) ────
     # Per-tool tri-state enforcement policy (hard_manifest | soft_guard | off)
     # for MCP tool calls, edited by the owner in the Mini App's "🛡 Манифест-
