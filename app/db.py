@@ -18,6 +18,18 @@ Manifest-policy admin (Phase 1 — storage only, see app/policy/):
   policy          — single doc (_id "policy:__global__") holding the owner's
                     per-tool/class enforcement-tier overrides. No index needed
                     beyond the default _id index (one doc today).
+
+Signals + triage (ports omi-task-extractor's signals/triage layer — see
+app/signals.py + app/pipeline/triage.py):
+  signals         — unified feed, one record per Telegram chat's local-day
+                    activity bucket: {source: "telegram", source_id (unique
+                    compound with source), ts_start, ts_end, title, summary,
+                    participants_raw, ingested_at, raw_ref, triage: {score,
+                    category, verdict, reason, rubric_version, scored_at}
+                    (optional, written by the triage stage)}
+  triage_feedback — write-only human-feedback log {signal_id, human_verdict:
+                    approved|rejected|pulled_from_dropped, note, created_at}
+                    — see app/pipeline/triage.py::record_triage_feedback
 """
 from __future__ import annotations
 
@@ -120,3 +132,15 @@ async def _ensure_indexes(
     )
     # `sync_cursors`: one tiny row per provider holding its delta cursor.
     await db.sync_cursors.create_index([("provider", ASCENDING)], unique=True)
+
+    # ── Signals + triage (app/signals.py, app/pipeline/triage.py) ────────
+    # Idempotency key for app/signals.py::upsert_signal — a re-ingested
+    # source_id overwrites the stored doc in place instead of inserting a
+    # duplicate (same convention as omi-task-extractor's signals index).
+    await db.signals.create_index(
+        [("source", ASCENDING), ("source_id", ASCENDING)], unique=True
+    )
+    # `triage_feedback`: write-only human-feedback log, looked up by the
+    # signal it's about — no uniqueness constraint (a signal can accrue more
+    # than one feedback row over time).
+    await db.triage_feedback.create_index([("signal_id", ASCENDING)])

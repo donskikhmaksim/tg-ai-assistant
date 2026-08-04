@@ -732,6 +732,154 @@ async def verify_still_open(
     return result
 
 
+# ── Triage batch scoring (ports omi-task-extractor's app/llm/claude.py::
+# score_triage_batch — see app/pipeline/triage.py for the caller/flow) ─────
+# app/pipeline/triage.py runs one of these per tick over a whole ingest
+# window's worth of `signals` (Telegram chat/day activity buckets) —
+# deliberately batched, not one call per signal, since triage runs every
+# TRIAGE_INTERVAL_MINUTES and per-signal calls would multiply cost by the
+# tick's signal count for no benefit.
+
+TRIAGE_SYSTEM = (
+    "You triage a batch of SIGNALS — each one is a chunk of a Telegram chat's "
+    "activity (a day's worth of messages with one counterparty or group) — for "
+    "a personal task-management pipeline. For EACH signal, decide how much "
+    "attention it deserves before anything gets turned into an actual task. "
+    "Content may be in Russian or English.\n\n"
+    "RUBRIC — score HIGHER (closer to 1.0) when: the OWNER made a commitment "
+    "(said they will do something), someone made a commitment TO the owner, "
+    "a counterparty is clearly waiting on a reply or action from the owner, "
+    "or the signal names a concrete date, amount of money, or a person's "
+    "name that will need follow-up.\n"
+    "RUBRIC — score LOWER (closer to 0.0) when: it is small talk / social "
+    "chit-chat with no ask, a recap or discussion of news/events with no "
+    "action attached, or the same matter already tracked as an existing "
+    "task (a plain re-mention with nothing new).\n\n"
+    "category — pick exactly one per signal: \"commitment\" (someone "
+    "promised to do something), \"request\" (someone is asking for or "
+    "expecting an action, possibly from the owner), \"deadline\" (a concrete "
+    "date/time-bound obligation), \"info\" (useful context, no action "
+    "needed), \"noise\" (small talk, no real signal).\n\n"
+    "reason — one short sentence explaining the score, in the same language "
+    "as the signal's own content when reasonable.\n\n"
+    "Score every signal independently. Return exactly one verdict per "
+    "signal, using its given 0-based index."
+)
+
+TRIAGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "score": {
+                        "type": "number",
+                        "description": "0.0 (pure noise) to 1.0 (clearly needs "
+                        "a human decision), per the RUBRIC.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["commitment", "request", "deadline", "info", "noise"],
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["index", "score", "category", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+_TRIAGE_MAX_TOKENS = 4000
+
+_TRIAGE_CLI_INSTRUCTION = (
+    "\n\n# OUTPUT FORMAT (STRICT)\n"
+    "Return ONLY a single JSON object that validates against this JSON Schema. "
+    "No prose, no explanation, no markdown, no code fences — just the raw JSON object.\n"
+    "JSON Schema:\n" + json.dumps(TRIAGE_SCHEMA, ensure_ascii=False)
+)
+
+
+def _triage_signal_line(index: int, item: dict[str, Any]) -> str:
+    parts = [f"{index}. [{item.get('source') or '?'}] {item.get('title') or '(no title)'}"]
+    if item.get("ts_start"):
+        parts.append(f"   when: {item['ts_start']}")
+    participants = item.get("participants_raw") or []
+    if participants:
+        parts.append(f"   participants: {', '.join(participants)}")
+    if item.get("summary"):
+        parts.append(f"   summary: {item['summary']}")
+    return "\n".join(parts)
+
+
+async def score_triage_batch(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One Claude call scoring a WHOLE batch of signals at once.
+
+    `items`: [{title, summary, participants_raw, source, ts_start}],
+    index-aligned with the caller's signal list (app/pipeline/triage.py
+    builds `items` from `signals` docs and matches results back by index).
+
+    Returns the raw list of verdicts the model produced —
+    [{index, score, category, reason}, ...] — NOT guaranteed to have one
+    entry per input item (a model that skips an index is the caller's
+    problem to handle, same convention as verify_still_open's index
+    matching). Returns [] on ANY failure (transport, parse, shape) —
+    fail-open, same as judge_same_task/verify_still_open: the caller must
+    treat a missing index as "not scored this tick", never invent a score.
+    """
+    if not items:
+        return []
+    s = get_settings()
+    user = (
+        "# SIGNALS\n"
+        + "\n".join(_triage_signal_line(i, it) for i, it in enumerate(items))
+        + "\n"
+    )
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": TRIAGE_SYSTEM,
+                "prompt": user + _TRIAGE_CLI_INSTRUCTION,
+                "model": (s.triage_model or s.claude_cli_model),
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
+            raw = _parse_json_loose(data.get("result") or "")
+        else:
+            resp = await _get_client().messages.create(
+                model=resolve_api_model(s.triage_model),
+                max_tokens=_TRIAGE_MAX_TOKENS,
+                thinking={"type": "adaptive"},
+                output_config={
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": TRIAGE_SCHEMA},
+                },
+                system=[
+                    {"type": "text", "text": TRIAGE_SYSTEM, "cache_control": {"type": "ephemeral"}}
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), None)
+            if text is None:
+                raise ValueError(f"no text block (stop_reason={resp.stop_reason})")
+            raw = json.loads(text)
+        verdicts = raw.get("verdicts")
+        return verdicts if isinstance(verdicts, list) else []
+    except Exception:  # noqa: BLE001 — fail-open: [] means "nothing scored this tick"
+        logger.warning("score_triage_batch failed", exc_info=True)
+        return []
+
+
 async def healthcheck() -> tuple[bool, str]:
     """Canary for the daily watchdog that exercises the SAME tier-2 path as
     extract(): the CLI shim when claude_cli_url is set (catches a dead shim, e.g.

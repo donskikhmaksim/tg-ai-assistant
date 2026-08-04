@@ -463,12 +463,13 @@ def test_mixed_case_headers_reach_a_real_mcp_response_not_400(monkeypatch):
     _run(go())
 
 
-def test_mixed_case_headers_tools_list_exposes_all_three_readonly_tools(monkeypatch):
+def test_mixed_case_headers_tools_list_exposes_all_readonly_tools(monkeypatch):
     """Companion to the initialize regression test above: completes the
     handshake (initialize -> notifications/initialized) and then calls
     tools/list, still with real-client header casing throughout, to confirm
-    all three read-only tools are actually reachable end-to-end and not just
-    that initialize alone happens to succeed."""
+    every read-only tool (including the signals/triage ones — see
+    app/signals.py, app/pipeline/triage.py) is actually reachable end-to-end
+    and not just that initialize alone happens to succeed."""
     async def go():
         async with _client(monkeypatch) as client:
             common_headers = {
@@ -516,6 +517,9 @@ def test_mixed_case_headers_tools_list_exposes_all_three_readonly_tools(monkeypa
             payload = await tools_resp.json()
             assert "error" not in payload
             names = {t["name"] for t in payload["result"]["tools"]}
-            assert names == {"list_conversations", "list_tasks", "get_daily_bundle"}
+            assert names == {
+                "list_conversations", "list_tasks", "get_daily_bundle",
+                "get_triage_queue", "submit_triage_feedback",
+            }
 
     _run(go())

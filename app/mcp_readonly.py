@@ -11,7 +11,7 @@ path-embedded-secret convention TICKTICK_MCP_URL already uses in this repo
 (see .env.example). Empty secret -> register_routes() is a no-op (fail-open,
 matching QWEN_BASE_URL/TRANSCRIBE_URL/BACKUP_S3_* elsewhere in config.py).
 
-Three tools:
+Five tools:
   list_conversations — raw transcripts for the last N CALENDAR days (not
                         "active days" — this repo has no reusable "active
                         days" concept as a function; see get_daily_bundle
@@ -28,6 +28,25 @@ Three tools:
                         [earliest active day .. requested date] span in one
                         call. list_conversations/list_tasks stay available
                         as a fallback for a wider/different range.
+  get_triage_queue     — the triaged `signals` (see app/pipeline/triage.py,
+                        app/signals.py — a port of omi-task-extractor's
+                        signals+triage layer): score/category/verdict per
+                        chat/day activity bucket, optionally filtered to one
+                        verdict ("drop"/"auto"/"decision").
+  submit_triage_feedback — THE ONE WRITE TOOL in this otherwise strictly
+                        read-only server. Deliberate, narrow exception: it
+                        does not touch TickTick or any other external
+                        system — it only appends a row to the internal
+                        `triage_feedback` collection
+                        (app/pipeline/triage.py::record_triage_feedback),
+                        the seed for a future rubric-calibration loop. That
+                        is purely internal bookkeeping about how well THIS
+                        service's own triage call performed, not an
+                        external side effect, so it does not violate "no
+                        write tools here — creating/editing/completing
+                        tasks happens through the owner's own separate
+                        TickTick MCP connector" for anything that matters
+                        externally.
 
 ASGI bridge: aiohttp has no native ASGI host, and the `mcp` package's
 Streamable HTTP transport (mcp.server.streamable_http_manager) is ASGI-only.
@@ -62,12 +81,16 @@ mcp = FastMCP(
     name="tg-ai-assistant-readonly",
     instructions=(
         "Read-only view into this owner's Telegram task-extraction pipeline: "
-        "raw conversation transcripts and the tasks already extracted from "
-        "them. There are no write tools here — creating/editing/completing "
+        "raw conversation transcripts, the tasks already extracted from "
+        "them, and a triaged `signals` queue. Creating/editing/completing "
         "tasks happens through the owner's own separate TickTick MCP "
-        "connector, not this server. Start with get_daily_bundle for a "
-        "single-call daily snapshot; fall back to list_conversations / "
-        "list_tasks directly for a wider or more specific range."
+        "connector, not this server — the ONE exception is "
+        "submit_triage_feedback, which only records this server's own "
+        "internal triage bookkeeping, never an external system. Start with "
+        "get_daily_bundle for a single-call daily snapshot; fall back to "
+        "list_conversations / list_tasks directly for a wider or more "
+        "specific range; use get_triage_queue for the drop/auto/decision "
+        "triage review."
     ),
     json_response=True,
 )
@@ -201,6 +224,42 @@ async def _tasks_in_range(
     return out
 
 
+def _signal_triage_item(doc: dict[str, Any]) -> dict[str, Any]:
+    """One get_triage_queue output item from a raw `signals` doc — see
+    get_triage_queue's docstring for field meanings. Every field under
+    `triage.*` is None when the signal hasn't been scored yet (shouldn't
+    normally happen since the Mongo filter requires `triage` to exist, but
+    kept defensive rather than assuming)."""
+    triage = doc.get("triage") or {}
+    return {
+        "signal_id": f"{doc.get('source')}:{doc.get('source_id')}",
+        "source": doc.get("source"),
+        "source_id": doc.get("source_id"),
+        "ts_start": _iso(doc.get("ts_start")),
+        "title": doc.get("title"),
+        "summary": doc.get("summary"),
+        "participants_raw": doc.get("participants_raw") or [],
+        "score": triage.get("score"),
+        "category": triage.get("category"),
+        "verdict": triage.get("verdict"),
+        "reason": triage.get("reason"),
+        "rubric_version": triage.get("rubric_version"),
+        "scored_at": _iso(triage.get("scored_at")),
+    }
+
+
+async def _triage_queue_items(since: datetime, verdict: str | None) -> list[dict[str, Any]]:
+    """get_triage_queue's full body, factored out for the same reason
+    _conversations_in_range/_tasks_in_range are: keeps the Mongo query +
+    shaping testable/reusable independent of the MCP tool wiring."""
+    db = get_db()
+    filt: dict[str, Any] = {"ts_start": {"$gte": since}, "triage": {"$exists": True}}
+    if verdict:
+        filt["triage.verdict"] = verdict
+    cursor = db.signals.find(filt).sort("ts_start", -1)
+    return [_signal_triage_item(d) async for d in cursor]
+
+
 async def list_conversations(days_back: int = 3, chat_id: int | None = None) -> list[dict[str, Any]]:
     """Raw conversation transcripts for the last `days_back` CALENDAR days
     (today counts as one; NOT "active days" — every calendar day in the
@@ -318,6 +377,88 @@ async def get_daily_bundle(
     }
 
 
+async def get_triage_queue(
+    verdict: str | None = None, days_back: int = 3
+) -> list[dict[str, Any]]:
+    """Triaged `signals` (see app/pipeline/triage.py, app/signals.py) from
+    the last `days_back` calendar days — the queue an external morning
+    triage review reads from.
+
+    `verdict` — optional filter to exactly one of "drop" / "auto" /
+    "decision" (see app/pipeline/triage.py module docstring for what each
+    means, driven by TRIAGE_LOW/TRIAGE_HIGH in app/config.py). None
+    (default) returns all three.
+
+    Only signals that HAVE been triaged already are returned — a signal
+    still waiting on its next triage tick simply isn't in the result yet;
+    there is no "pending" verdict to filter on.
+
+    Each returned item:
+      signal_id         — f"{source}:{source_id}", the same idempotency key
+                          signals.upsert_signal keys on — pass this straight
+                          to submit_triage_feedback.
+      source             — "telegram" (the only source this repo ingests).
+      source_id          — f"{internal chatId}:{YYYY-MM-DD}" — see
+                          app/signals.py module docstring for why a chat/day
+                          bucket is this repo's signal unit.
+      ts_start            — ISO 8601, earliest message in the bucket.
+      title               — chat title.
+      summary             — a plain "sender: text" transcript excerpt of the
+                          bucket (not an LLM summary — see app/signals.py),
+                          or null.
+      participants_raw    — sender display names.
+      score               — 0.0-1.0 triage score.
+      category            — "commitment" | "request" | "deadline" | "info" |
+                          "noise".
+      verdict             — "drop" | "auto" | "decision".
+      reason              — one-line explanation from the triage call.
+      rubric_version      — the rubric version this signal was scored under
+                          (see app/pipeline/triage.py RUBRIC_VERSION).
+      scored_at           — ISO 8601, when this triage verdict was written.
+
+    Sorted newest-first by ts_start.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days_back)
+    return await _triage_queue_items(since, verdict)
+
+
+async def submit_triage_feedback(
+    signal_id: str, verdict: str, note: str | None = None
+) -> dict[str, Any]:
+    """Record a human verdict on one triaged signal from the
+    get_triage_queue result — THE ONLY WRITE tool on this server, see the
+    module docstring for why this narrow exception doesn't violate the
+    read-only-towards-external-systems contract.
+
+    `signal_id` — the `signal_id` field from a get_triage_queue item
+    (f"{source}:{source_id}").
+    `verdict` — one of "approved" (the triage call got it right),
+    "rejected" (this shouldn't have surfaced / was mis-scored), or
+    "pulled_from_dropped" (this was verdict="drop" but a human found it
+    anyway and it turned out to matter). Anything else is rejected with
+    {"ok": false, ...} rather than silently accepted.
+    `note` — optional free-text context for a future rubric-calibration
+    pass.
+
+    Returns {"ok": true} on success, or {"ok": false, "error": <str>} on any
+    failure (bad verdict, Mongo error) — never raises, so a bad argument
+    from the calling client doesn't tear down the MCP session.
+    """
+    # Local import: app/signals.py imports FROM this module
+    # (mcp_readonly._tz/_local_midnight_utc/_format_message), and
+    # app/pipeline/triage.py imports FROM app/signals.py (upsert_signal) — a
+    # module-level import here would close that into an import cycle
+    # (mcp_readonly -> triage -> signals -> mcp_readonly). Importing inside
+    # the tool call sidesteps it.
+    from .pipeline.triage import record_triage_feedback
+
+    try:
+        await record_triage_feedback(signal_id, verdict, note)
+    except Exception as exc:  # noqa: BLE001 — bad input/Mongo error -> {"ok": false}, never raise
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # MCP tool registration — thin wrappers so @mcp.tool()'s introspection sees
 # clean signatures/docstrings; mcp.server.fastmcp.tool() registers and
@@ -328,6 +469,8 @@ async def get_daily_bundle(
 mcp.tool(name="list_conversations")(list_conversations)
 mcp.tool(name="list_tasks")(list_tasks)
 mcp.tool(name="get_daily_bundle")(get_daily_bundle)
+mcp.tool(name="get_triage_queue")(get_triage_queue)
+mcp.tool(name="submit_triage_feedback")(submit_triage_feedback)
 
 
 # ---------------------------------------------------------------------------
@@ -453,4 +596,7 @@ def register_routes(app: web.Application) -> None:
     app.on_startup.append(_start)
     app.on_cleanup.append(_stop)
     # Deliberately not logging the path — it contains the secret.
-    logger.info("Read-only MCP server mounted (tools: list_conversations, list_tasks, get_daily_bundle)")
+    logger.info(
+        "Read-only MCP server mounted (tools: list_conversations, list_tasks, "
+        "get_daily_bundle, get_triage_queue, submit_triage_feedback)"
+    )

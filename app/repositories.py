@@ -443,6 +443,26 @@ async def get_bot_state(key: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# signals ingest cursor (app/signals.py) — reuses bot_state's existing
+# key/value store (already the single small persistent-cursor mechanism in
+# this repo, used for the owner id / business connection id / TickTick URL
+# override) rather than introducing a dedicated "meta" collection the way
+# the omi-task-extractor reference does — same idempotent
+# get/set-a-single-value shape, just one more key.
+# ---------------------------------------------------------------------------
+
+_SIGNALS_LAST_RUN_KEY = "signals_last_run_at"
+
+
+async def get_signals_last_run_at() -> datetime | None:
+    return await get_bot_state(_SIGNALS_LAST_RUN_KEY)
+
+
+async def set_signals_last_run_at(when: datetime) -> None:
+    await set_bot_state(_SIGNALS_LAST_RUN_KEY, when)
+
+
+# ---------------------------------------------------------------------------
 # chat_settings (per-chat context + LLM rule overrides)
 #
 # Schema:

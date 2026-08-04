@@ -308,6 +308,39 @@ class Settings(BaseSettings):
     # Fail-open: empty secret -> the route is not mounted at all.
     mcp_readonly_secret: str = ""
 
+    # ─── Signals + triage (ports omi-task-extractor's app/signals.py +
+    # app/pipeline/triage.py — see those modules' docstrings for the shared
+    # architecture). A `signals` collection unifies "things that happened"
+    # (here: one record per Telegram chat's local-calendar-day activity
+    # bucket — this repo's data model has no discrete OMI-style
+    # conversation-id or Gmail-style thread-id boundary, so the day-bucket
+    # already established by get_daily_bundle's active-day scanning
+    # (app/mcp_readonly.py) is reused as the natural signal unit) ahead of a
+    # cheap batched triage pass that scores each into drop/auto/decision
+    # BEFORE anything becomes a task-extraction candidate. Not yet consumed
+    # by app/pipeline/batch.py — this is the triage layer only, same scope
+    # boundary as the omi port (claims/dedup is a separate later step).
+    #
+    # How often app/signals.py::ingest_telegram_signals folds fresh
+    # raw_messages into `signals`, minutes.
+    signals_ingest_interval_minutes: int = 10
+    # Triage verdict thresholds (see app/pipeline/triage.py::verdict_for_score):
+    #   score <  TRIAGE_LOW              -> "drop"
+    #   TRIAGE_LOW <= score <= TRIAGE_HIGH -> "auto"
+    #   score >  TRIAGE_HIGH             -> "decision"
+    triage_low: float = 0.3
+    triage_high: float = 0.7
+    # Model alias for the batched triage scoring call (app/llm/claude.py::
+    # score_triage_batch) — same opus|sonnet|haiku alias scheme as
+    # extract_model/dedup_judge_model. Cheap classification, not deep
+    # reasoning, so sonnet by default.
+    triage_model: str = "sonnet"
+    # How often app/pipeline/triage.py::run_triage_tick runs, minutes.
+    triage_interval_minutes: int = 15
+    # How many days back run_triage_tick looks for signals with no `triage`
+    # field yet (or scored under a stale rubric_version) each tick.
+    triage_lookback_days: int = 3
+
     # ─── Manifest-policy admin (Phase 1 — storage + Mini App UI only) ────
     # Per-tool tri-state enforcement policy (hard_manifest | soft_guard | off)
     # for MCP tool calls, edited by the owner in the Mini App's "🛡 Манифест-

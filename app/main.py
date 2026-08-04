@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -14,8 +15,14 @@ from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
 from .pipeline.summary import run_daily_summary
+from .pipeline.triage import run_triage_tick
 from .pipeline.watchdog import run_watchdog
-from .repositories import init_global_defaults
+from .repositories import (
+    get_signals_last_run_at,
+    init_global_defaults,
+    set_signals_last_run_at,
+)
+from .signals import ingest_telegram_signals
 from .telegram.bot import build_bot, build_dispatcher
 from .web.server import start_web
 
@@ -47,6 +54,39 @@ async def main() -> None:
     await init_db()
     await init_global_defaults()
 
+    # Signals + triage (ports omi-task-extractor's signals/triage layer —
+    # see app/signals.py, app/pipeline/triage.py). A failing tick must NEVER
+    # kill the scheduler — every job body below is wrapped, same convention
+    # as run_batch/run_watchdog/run_daily_summary already follow.
+    async def signals_job() -> None:
+        """Fold recent raw_messages into the unified `signals` collection.
+        Cursor: bot_state key "signals_last_run_at" (see
+        repositories.get/set_signals_last_run_at) — a tick only reprocesses
+        chat/day buckets touched since the previous successful run. No
+        stored cursor yet (first run) -> look back 24h."""
+        try:
+            last_run_at = await get_signals_last_run_at()
+            since = last_run_at or (datetime.now(timezone.utc) - timedelta(hours=24))
+            count = await ingest_telegram_signals(since)
+            await set_signals_last_run_at(datetime.now(timezone.utc))
+            logger.info("Signals ingest: processed %d signal(s)", count)
+        except Exception:  # noqa: BLE001
+            logger.exception("signals ingest tick failed")
+
+    async def triage_job() -> None:
+        """Score recent `signals` lacking a `triage` field (see
+        app/pipeline/triage.py) into score/category/verdict, one batched
+        Claude call per tick. Unlike signals_job, this has no cursor of its
+        own — get_pending_triage_signals re-scans TRIAGE_LOOKBACK_DAYS of
+        signals every tick, filtering on "no triage field / stale
+        rubric_version" in the query itself, so re-running never re-scores
+        anything already done."""
+        try:
+            count = await run_triage_tick(settings)
+            logger.info("Triage: scored %d signal(s)", count)
+        except Exception:  # noqa: BLE001
+            logger.exception("triage tick failed")
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         run_batch,
@@ -55,6 +95,26 @@ async def main() -> None:
         id="batch",
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        signals_job,
+        "interval",
+        minutes=settings.signals_ingest_interval_minutes,
+        id="signals_ingest",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        triage_job,
+        "interval",
+        minutes=settings.triage_interval_minutes,
+        id="triage",
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info(
+        "Signals+triage scheduled: ingest every %d min, triage every %d min",
+        settings.signals_ingest_interval_minutes, settings.triage_interval_minutes,
     )
     scheduler.start()
     logger.info("Batch scheduler started: every %d min", settings.batch_interval_min)
