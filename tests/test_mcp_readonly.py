@@ -398,3 +398,124 @@ def test_correct_secret_path_is_routed_to_the_mcp_server(monkeypatch):
             assert resp.status != 404
 
     _run(go())
+
+
+def test_mixed_case_headers_reach_a_real_mcp_response_not_400(monkeypatch):
+    """Regression test for the ASGI-scope header-casing bug: _asgi_bridge used
+    to forward request.raw_headers to the ASGI scope verbatim (whatever case
+    the client sent, e.g. "Content-Type"), but the ASGI spec requires the
+    host/bridge itself to lower-case header names before handing them to the
+    app — Starlette's Headers (built straight from scope["headers"], see
+    starlette.datastructures.Headers.__init__'s `elif scope is not None`
+    branch) and the mcp package's own transport_security /
+    streamable_http._check_content_type / _check_accept_headers all look
+    headers up by exact-matching a lower-cased key. With un-lowered headers
+    every real HTTP client (which sends "Content-Type", "Accept", not the
+    lower-case forms) got a hard-coded 400 "Invalid Content-Type header" —
+    the endpoint never produced a real MCP response at all.
+
+    This performs an actual protocol-level `initialize` call through the full
+    stack (aiohttp route -> _asgi_bridge -> StreamableHTTPSessionManager),
+    with headers cased exactly as a normal HTTP client sends them, and checks
+    the STATUS CODE explicitly (previous coverage only asserted `!= 404`,
+    which a 400 also satisfies — that's why this regression shipped to prod
+    unnoticed).
+    """
+    async def go():
+        async with _client(monkeypatch) as client:
+            resp = await client.post(
+                "/mcp/right-secret-123",
+                headers={
+                    # Deliberately mixed/title-case, as sent by aiohttp's own
+                    # `json=` kwarg and by virtually every real HTTP client —
+                    # NOT already-lower-cased "content-type"/"accept".
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "regression-test-client", "version": "1.0"},
+                    },
+                },
+            )
+
+            # The exact bug: transport_security._validate_content_type looks
+            # up request.headers.get("content-type") and, finding nothing
+            # (because the stored key was "Content-Type"), always returned
+            # 400 "Invalid Content-Type header" here — regardless of secret
+            # routing being correct. A bare `!= 404` check does not catch
+            # this; the status code itself must be asserted.
+            assert resp.status == 200, await resp.text()
+
+            payload = await resp.json()
+            assert payload["jsonrpc"] == "2.0"
+            assert payload["id"] == 1
+            assert "error" not in payload
+            result = payload["result"]
+            assert result["serverInfo"]["name"] == "tg-ai-assistant-readonly"
+            assert "tools" in result["capabilities"]
+
+    _run(go())
+
+
+def test_mixed_case_headers_tools_list_exposes_all_three_readonly_tools(monkeypatch):
+    """Companion to the initialize regression test above: completes the
+    handshake (initialize -> notifications/initialized) and then calls
+    tools/list, still with real-client header casing throughout, to confirm
+    all three read-only tools are actually reachable end-to-end and not just
+    that initialize alone happens to succeed."""
+    async def go():
+        async with _client(monkeypatch) as client:
+            common_headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+
+            init_resp = await client.post(
+                "/mcp/right-secret-123",
+                headers=common_headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "regression-test-client", "version": "1.0"},
+                    },
+                },
+            )
+            assert init_resp.status == 200, await init_resp.text()
+            session_id = init_resp.headers.get("mcp-session-id")
+
+            session_headers = dict(common_headers)
+            if session_id:
+                session_headers["Mcp-Session-Id"] = session_id
+
+            # Required notification before any further request in a
+            # stateful session — the JSON-RPC handshake isn't done until
+            # this is sent.
+            notify_resp = await client.post(
+                "/mcp/right-secret-123",
+                headers=session_headers,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
+            assert notify_resp.status == 202, await notify_resp.text()
+
+            tools_resp = await client.post(
+                "/mcp/right-secret-123",
+                headers=session_headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
+            assert tools_resp.status == 200, await tools_resp.text()
+            payload = await tools_resp.json()
+            assert "error" not in payload
+            names = {t["name"] for t in payload["result"]["tools"]}
+            assert names == {"list_conversations", "list_tasks", "get_daily_bundle"}
+
+    _run(go())

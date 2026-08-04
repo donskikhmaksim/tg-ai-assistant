@@ -368,7 +368,13 @@ async def _asgi_bridge(asgi_handler: Any, request: web.Request) -> web.StreamRes
         "raw_path": request.raw_path.encode(),
         "query_string": request.query_string.encode(),
         "root_path": "",
-        "headers": list(request.raw_headers),
+        # ASGI spec requires the host/bridge to lower-case header names before
+        # they reach the app (Starlette's Headers/mcp's transport_security
+        # trust this and look up e.g. "content-type" verbatim) — raw_headers
+        # come off the wire in whatever case the client sent (browsers/most
+        # HTTP clients send "Content-Type"), so lower-case them here rather
+        # than passing them through unchanged.
+        "headers": [(k.lower(), v) for k, v in request.raw_headers],
         "client": (request.remote or "", 0),
         "server": (request.url.host or "", request.url.port or 0),
         "state": {},
