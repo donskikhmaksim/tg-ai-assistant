@@ -1,6 +1,11 @@
 import asyncio
 
-from app.ticktick.mcp_client import TickTickMCP, _parse_pairs, _parse_projects
+from app.ticktick.mcp_client import (
+    TickTickMCP,
+    _parse_pairs,
+    _parse_project_cards,
+    _parse_projects,
+)
 
 # Real list_project_columns output shape: "- <name>  (id: <id>)".
 COLUMNS = """Columns of project 69f841179f1911020b96a62b (2):
@@ -67,6 +72,84 @@ def test_projects_live_paren_id_blocks():
         {"name": "🧠Assistant", "id": "699d03848f0853b739baf1d6"},
         {"name": "Тест", "id": "69eac1bd6d2ed12a11aaf7c2"},
     ]
+
+
+# Real get_project_tasks output (captured live from the deployed ticktick-mcp,
+# 2026-08-04, project '⭐Personal', truncated to its first 2 of 216 tasks).
+# REGRESSION: the parser used to look for a trailing "(id: <id> | project:
+# <pid>)" marker that the deployed server has never emitted — it puts the id on
+# its own "ID:" line instead. Every block silently failed to match, so
+# get_project_tasks() always returned [] and the semantic-dedup candidate pool
+# (app/pipeline/batch.py) was empty no matter how high dedup_project_task_cap
+# was set. This fixture is the exact server text, not a hand-written guess.
+PROJECT_TASKS_LIVE = """Found 216 tasks in project '⭐Personal':
+
+Task 1:
+ID: 6a64e0a48f08bf71b42143c8
+Title: Оплатить Coinbase One Card — минимум $88 до 19.08
+Project ID: 699d03848f0853b739baf1ca
+Start Date: 2026-08-16T00:00:00.000+0000
+Due Date: 2026-08-16T00:00:00.000+0000
+Priority: Medium
+Status: Active
+
+Content:
+От: Coinbase One Card <noreply@creditcard.coinbase.com>
+Тема: Your latest statement is ready
+
+Выписка от 25.07.2026:
+• Срок оплаты: 19 августа 2026
+• Минимальный платёж: $88.00
+• Баланс выписки: $1,830.72
+
+Действие: оплатить минимум $88 через приложение Coinbase (можно настроить автоплатёж).
+Телефон поддержки: (888) 908-7930
+
+Task 2:
+ID: 6a5f60d08f08722c0a906094
+Title: Проверить отменённый перевод Chase Auto $876.69 — до 13.08
+Project ID: 699d03848f0853b739baf1ca
+Start Date: 2026-08-12T21:00:00.000+0000
+Due Date: 2026-08-13T00:00:00.000+0000
+Priority: High
+Status: Active
+
+Content:
+От: Chase (no.reply.alerts@chase.com)
+Тема: Your transfer has been cancelled
+
+Система отменила запланированный автоплатёж:
+• Сумма: $876.69
+• Откуда: Citibank (...9512)
+• Куда: Chase Auto Account (...4038)
+• Плановая дата: 14 августа 2026
+
+Действия:
+1. Проверить, почему отменён перевод (Chase app/сайт)
+2. Если отмена ошибочна — восстановить платёж до 14.08
+3. Убедиться, что платёж по автокредиту не пропущен
+
+"""
+
+
+def test_parses_real_project_tasks_blocks_not_empty():
+    """The exact regression: this must NOT come back []."""
+    cards = _parse_project_cards(PROJECT_TASKS_LIVE)
+    assert len(cards) == 2
+
+
+def test_parses_real_project_tasks_fields():
+    cards = _parse_project_cards(PROJECT_TASKS_LIVE)
+    assert cards[0]["id"] == "6a64e0a48f08bf71b42143c8"
+    assert cards[0]["title"] == "Оплатить Coinbase One Card — минимум $88 до 19.08"
+    assert cards[0]["due"] == "2026-08-16T00:00:00.000+0000"
+    assert cards[0]["priority"] == "Medium"
+    assert cards[0]["status"] == "Active"
+    assert "Coinbase" in cards[0]["content"]
+
+    assert cards[1]["id"] == "6a5f60d08f08722c0a906094"
+    assert cards[1]["title"] == "Проверить отменённый перевод Chase Auto $876.69 — до 13.08"
+    assert cards[1]["due"] == "2026-08-13T00:00:00.000+0000"
 
 
 def test_json_array_fallback():

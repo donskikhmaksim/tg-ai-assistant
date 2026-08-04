@@ -108,17 +108,37 @@ def _parse_task_lines(text: str) -> list[dict[str, str]]:
     return out
 
 
-# get_project_tasks emits rich `Task N:` blocks, NOT bullets: a `Title:` line,
-# optional `Due Date:`/`Priority:`/`Status:`, a multi-line `Content:` section,
-# then a closing `(id: <id> | project: <pid>)` line. Parse the full card so the
-# semantic dedup / curation can weigh content + due, not just the title.
+# get_project_tasks emits rich `Task N:` blocks, NOT bullets: an `ID:` line,
+# a `Title:` line, a `Project ID:` line, optional `Start Date:`/`Due Date:`/
+# `Priority:`/`Status:`, then an optional multi-line `Content:` section.
+# Parse the full card so the semantic dedup / curation can weigh content + due,
+# not just the title.
+#
+# NOTE (2026-08-04): this used to assume the id/project trailed the block as
+# "(id: <id> | project: <pid>)" — that shape has never matched the deployed
+# server, which puts the id on its own "ID:" line instead (confirmed against a
+# live 216-task project dump). Every block silently failed to parse and
+# get_project_tasks() always returned [] — the semantic-dedup candidate pool
+# was empty. `_BLK_ID_TRAILER_RE` is kept as a first attempt (structural, not
+# language-specific) in case a future server build reintroduces that shape;
+# `_ID_RE` covers the real one.
 _BLOCK_SPLIT_RE = re.compile(r"(?m)^Task\s+\d+:\s*$")
 _BLK_TITLE_RE = re.compile(r"(?m)^Title:\s*(.+?)\s*$")
 _BLK_DUE_RE = re.compile(r"(?m)^Due Date:\s*(.+?)\s*$")
 _BLK_PRIO_RE = re.compile(r"(?m)^Priority:\s*(.+?)\s*$")
 _BLK_STATUS_RE = re.compile(r"(?m)^Status:\s*(.+?)\s*$")
-_BLK_ID_RE = re.compile(r"\(id:\s*(\S+?)\s*\|\s*project:\s*([^)]+?)\)", re.I)
+_BLK_ID_TRAILER_RE = re.compile(r"\(id:\s*(\S+?)\s*\|\s*project:\s*([^)]+?)\)", re.I)
 _BLK_CONTENT_RE = re.compile(r"(?ms)^Content:\s*\n(.*?)(?=\n\(id:|\Z)")
+
+
+def _blk_task_id(blk: str) -> str | None:
+    """Recover a task's id from a `Task N:` block, tolerant of both the
+    parenthesised trailer shape and the real standalone `ID:` line."""
+    if (m := _BLK_ID_TRAILER_RE.search(blk)) is not None:
+        return m.group(1).strip()
+    if (m := _ID_RE.search(blk)) is not None:
+        return m.group(1).strip()
+    return None
 
 
 def _parse_project_cards(text: str) -> list[dict[str, str]]:
@@ -131,11 +151,11 @@ def _parse_project_cards(text: str) -> list[dict[str, str]]:
     blocks = _BLOCK_SPLIT_RE.split(text)
     cards: list[dict[str, str]] = []
     for blk in blocks:
-        m_id = _BLK_ID_RE.search(blk)
+        task_id = _blk_task_id(blk)
         m_title = _BLK_TITLE_RE.search(blk)
-        if not (m_id and m_title):
+        if not (task_id and m_title):
             continue
-        card = {"id": m_id.group(1).strip(), "title": m_title.group(1).strip()}
+        card = {"id": task_id, "title": m_title.group(1).strip()}
         if (m := _BLK_DUE_RE.search(blk)) and m.group(1).strip().lower() != "none":
             card["due"] = m.group(1).strip()
         if (m := _BLK_PRIO_RE.search(blk)) and m.group(1).strip().lower() != "none":
