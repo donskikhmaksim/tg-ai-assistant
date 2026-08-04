@@ -142,12 +142,21 @@ async def upsert_signal(doc: dict[str, Any], unset: list[str] | None = None) -> 
 
 # Fields reset (via upsert_signal's `unset`) whenever a re-ingested bucket's
 # message set has changed since it was last evaluated — see
-# _bucket_changed/ingest_telegram_signals. Both are denormalized
+# _bucket_changed/ingest_telegram_signals. All three are denormalized
 # pipeline-stage outputs written by later stages (app/pipeline/triage.py,
-# app/pipeline/claims.py) directly onto the signal doc; signals.py owns
-# invalidating them because it's the only stage that knows a bucket's
-# content actually changed.
-_STALE_ON_CONTENT_CHANGE = ["triage", "claimed"]
+# app/pipeline/claims.py, app/pipeline/calendar_events.py) directly onto the
+# signal doc; signals.py owns invalidating them because it's the only stage
+# that knows a bucket's content actually changed.
+#
+# `calendar_extracted` (app/pipeline/calendar_events.py) resetting here is
+# SAFE the same way `claimed` resetting is safe: that stage's idempotency
+# key (event_key, a content hash of activity_type|counterparty|start — see
+# calendar_events.py's module docstring §1) is built from the EXTRACTED
+# event's own content, not from this signal's source_id, so a re-extraction
+# of the same bucket upserts the SAME `calendar_events` row (via
+# upsert_calendar_event's $setOnInsert-protected status field) instead of
+# creating a second calendar event for a matter already captured.
+_STALE_ON_CONTENT_CHANGE = ["triage", "claimed", "calendar_extracted"]
 
 
 def _bucket_changed(existing: dict[str, Any] | None, new_message_ids: list[int]) -> bool:

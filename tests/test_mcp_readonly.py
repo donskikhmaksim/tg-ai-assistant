@@ -108,13 +108,17 @@ class FakeDB:
         self.raw_messages = FakeCollection()
         self.tasks = FakeCollection()
         self.chat_state = FakeCollection()
+        self.calendar_events = FakeCollection()
 
 
-def _use_fake_db(monkeypatch, raw_messages=None, tasks=None, chat_state=None):
+def _use_fake_db(
+    monkeypatch, raw_messages=None, tasks=None, chat_state=None, calendar_events=None
+):
     db = FakeDB()
     db.raw_messages = FakeCollection(raw_messages or [])
     db.tasks = FakeCollection(tasks or [])
     db.chat_state = FakeCollection(chat_state or [])
+    db.calendar_events = FakeCollection(calendar_events or [])
     monkeypatch.setattr(mcpro, "get_db", lambda: db)
     monkeypatch.setattr(repo, "get_db", lambda: db)
     return db
@@ -346,6 +350,58 @@ def test_get_daily_bundle_chat_id_filter(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# get_calendar_events_queue — the dry-run review surface for
+# app/pipeline/calendar_events.py (see that module + app/calendar_mcp.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _calendar_event_doc(event_key: str, status: str, **overrides) -> dict:
+    doc = {
+        "event_key": event_key,
+        "signal_ids": ["telegram:user_1:2026-08-03"],
+        "title": "Созвон: клиент",
+        "activity_type": "call",
+        "counterparty": "клиент",
+        "start": "2026-08-04T15:00:00-07:00",
+        "end": "2026-08-04T16:00:00-07:00",
+        "all_day": False,
+        "description": f"[tg-ai-assistant] key={event_key}",
+        "quote_verified": True,
+        "confidence": 0.9,
+        "needs_clarification": False,
+        "status": status,
+        "skip_reason": None,
+        "google_event_id": None,
+        "google_html_link": None,
+        "created_at": datetime.now(timezone.utc),
+    }
+    doc.update(overrides)
+    return doc
+
+
+def test_get_calendar_events_queue_filters_by_status(monkeypatch):
+    pending = _calendar_event_doc("key-pending", "pending")
+    created = _calendar_event_doc("key-created", "created", google_event_id="g1")
+    _use_fake_db(monkeypatch, calendar_events=[pending, created])
+
+    items = _run(mcpro.get_calendar_events_queue(status="pending", days_back=3))
+
+    assert [i["event_key"] for i in items] == ["key-pending"]
+    assert items[0]["title"] == "Созвон: клиент"
+    assert items[0]["status"] == "pending"
+
+
+def test_get_calendar_events_queue_returns_all_statuses_when_unfiltered(monkeypatch):
+    pending = _calendar_event_doc("key-pending", "pending")
+    skipped = _calendar_event_doc("key-skipped", "skipped", skip_reason="low_confidence")
+    _use_fake_db(monkeypatch, calendar_events=[pending, skipped])
+
+    items = _run(mcpro.get_calendar_events_queue(days_back=3))
+
+    assert {i["event_key"] for i in items} == {"key-pending", "key-skipped"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HTTP layer: secret-in-path gating
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -519,7 +575,8 @@ def test_mixed_case_headers_tools_list_exposes_all_readonly_tools(monkeypatch):
             names = {t["name"] for t in payload["result"]["tools"]}
             assert names == {
                 "list_conversations", "list_tasks", "get_daily_bundle",
-                "get_triage_queue", "get_claims_queue", "submit_triage_feedback",
+                "get_triage_queue", "get_claims_queue", "get_calendar_events_queue",
+                "submit_triage_feedback",
             }
 
     _run(go())

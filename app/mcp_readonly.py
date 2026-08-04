@@ -11,7 +11,7 @@ path-embedded-secret convention TICKTICK_MCP_URL already uses in this repo
 (see .env.example). Empty secret -> register_routes() is a no-op (fail-open,
 matching QWEN_BASE_URL/TRANSCRIBE_URL/BACKUP_S3_* elsewhere in config.py).
 
-Five tools:
+Six tools:
   list_conversations — raw transcripts for the last N CALENDAR days (not
                         "active days" — this repo has no reusable "active
                         days" concept as a function; see get_daily_bundle
@@ -39,6 +39,16 @@ Five tools:
                         — a port of omi-task-extractor's claims layer), one
                         per triaged (+ cross-source-deduped, once a second
                         signal source exists) signal or signal group.
+  get_calendar_events_queue — captured calendar events (see
+                        app/pipeline/calendar_events.py, app/calendar_mcp.py
+                        — a downstream-of-triage sibling of get_claims_queue
+                        that writes into an ISOLATED "AI Captured" Google
+                        Calendar instead of TickTick), optionally filtered
+                        to one status ("pending"/"created"/"failed"/
+                        "skipped"). The dry-run review surface: while
+                        CALENDAR_EVENTS_ENABLED is off, every captured
+                        event sits here as "pending" without ever touching
+                        Google.
   submit_triage_feedback — THE ONE WRITE TOOL in this otherwise strictly
                         read-only server. Deliberate, narrow exception: it
                         does not touch TickTick or any other external
@@ -296,6 +306,66 @@ async def _claims_queue_items(since: datetime, verdict: str | None) -> list[dict
         filt["verdict"] = verdict
     cursor = db.claims.find(filt).sort("created_at", -1)
     return [_claim_queue_item(d) async for d in cursor]
+
+
+def _calendar_event_item(doc: dict[str, Any]) -> dict[str, Any]:
+    """One get_calendar_events_queue output item from a raw `calendar_events`
+    doc — see app/pipeline/calendar_events.py for field meanings. This is
+    the dry-run review surface: while CALENDAR_EVENTS_ENABLED is false,
+    every captured event sits here as "pending" so the owner can judge
+    quality before the real Google write is ever turned on."""
+    return {
+        "event_key": doc.get("event_key"),
+        "signal_ids": doc.get("signal_ids") or [],
+        "title": doc.get("title"),
+        "activity_type": doc.get("activity_type"),
+        "counterparty": doc.get("counterparty"),
+        "start": doc.get("start"),
+        "end": doc.get("end"),
+        "all_day": doc.get("all_day"),
+        "description": doc.get("description"),
+        "quote_verified": doc.get("quote_verified"),
+        "confidence": doc.get("confidence"),
+        "needs_clarification": doc.get("needs_clarification"),
+        "status": doc.get("status"),
+        "skip_reason": doc.get("skip_reason"),
+        "google_event_id": doc.get("google_event_id"),
+        "google_html_link": doc.get("google_html_link"),
+        "created_at": _iso(doc.get("created_at")),
+    }
+
+
+async def _calendar_events_items(since: datetime, status: str | None) -> list[dict[str, Any]]:
+    """get_calendar_events_queue's full body, factored out for the same
+    reason _triage_queue_items/_claims_queue_items are."""
+    db = get_db()
+    filt: dict[str, Any] = {"created_at": {"$gte": since}}
+    if status:
+        filt["status"] = status
+    cursor = db.calendar_events.find(filt).sort("created_at", -1)
+    return [_calendar_event_item(d) async for d in cursor]
+
+
+async def get_calendar_events_queue(
+    status: str | None = None, days_back: int = 3
+) -> list[dict[str, Any]]:
+    """Captured calendar events (see app/pipeline/calendar_events.py) from
+    the last `days_back` calendar days — the DRY-RUN review surface: while
+    CALENDAR_EVENTS_ENABLED is off (the default), every extracted event
+    lands here with status "pending" instead of ever touching Google, so
+    the owner can judge extraction quality before flipping that flag.
+
+    `status` — optional filter to exactly one of "pending" / "created" /
+    "failed" / "skipped". None (default) returns all four.
+
+    Strictly read-only, same posture as get_triage_queue/get_claims_queue —
+    this server never writes to calendar-mcp or Google itself; only
+    app/pipeline/calendar_events.py's own scheduled job does that, and only
+    when the flag is on.
+
+    Sorted newest-first by created_at."""
+    since = datetime.now(timezone.utc) - timedelta(days=days_back)
+    return await _calendar_events_items(since, status)
 
 
 async def list_conversations(days_back: int = 3, chat_id: int | None = None) -> list[dict[str, Any]]:
@@ -557,6 +627,7 @@ mcp.tool(name="list_tasks")(list_tasks)
 mcp.tool(name="get_daily_bundle")(get_daily_bundle)
 mcp.tool(name="get_triage_queue")(get_triage_queue)
 mcp.tool(name="get_claims_queue")(get_claims_queue)
+mcp.tool(name="get_calendar_events_queue")(get_calendar_events_queue)
 mcp.tool(name="submit_triage_feedback")(submit_triage_feedback)
 
 

@@ -407,6 +407,52 @@ class Settings(BaseSettings):
     # before wiring an MCP server's policy client in a future phase.
     policy_pull_token: str = ""
 
+    # ─── Calendar events capture — isolated "AI Captured" Google Calendar ──
+    # (ports the plan of the same name — see app/pipeline/calendar_events.py
+    # + app/calendar_mcp.py module docstrings for the full architecture).
+    # A SEPARATE stage, downstream of triage (never claims), turns triaged
+    # signals with an actual meeting/call/visit shape into events on an
+    # ISOLATED secondary Google Calendar — never the owner's primary one.
+    # Extraction + Mongo bookkeeping run always; the network write to Google
+    # is additionally gated by calendar_events_enabled (defaults False).
+    calendar_mcp_url: str = ""       # full streamable-HTTP URL, empty = feature off
+    calendar_mcp_token: str = ""     # Bearer token selecting the Google account
+    # Google account name on the calendar-mcp server. Empty = server default
+    # (confirmed live account name is "donskikh.ms" — do NOT hardcode a
+    # guessed alias like "personal" here, see the calendar_mcp module
+    # docstring for why).
+    calendar_mcp_account: str = ""
+    # id of the isolated "AI Captured" calendar (created by hand in the
+    # Google UI — calendar-mcp has no calendar-create tool). Empty, or the
+    # literal value "primary", disables event CREATION even when
+    # calendar_events_enabled is true (see CalendarMCP.create_event's guard).
+    calendar_target_calendar_id: str = ""
+    # Master gate on the real network write to Google. Extraction and Mongo
+    # bookkeeping (the `calendar_events` collection) always run regardless —
+    # only the actual create_event call is gated here, so the owner can
+    # review the `pending` queue (get_calendar_events_queue) before ever
+    # touching the real calendar. Defaults False; flip only after reviewing
+    # a day's worth of `pending` output.
+    calendar_events_enabled: bool = False
+    # Send extendedProperties/visibility/transparency to calendar-mcp.
+    # Defaults False because the DEPLOYED calendar-mcp server's
+    # calendar_event_create schema is additionalProperties:false and does
+    # NOT accept those fields today — sending them fails the whole call.
+    # Flip only after calendar-mcp itself is upgraded to accept them.
+    calendar_mcp_supports_extended: bool = False
+    # Model alias for the batched event-extraction call (app/llm/claude.py::
+    # extract_calendar_events_batch) — same opus|sonnet|haiku scheme as
+    # triage_model/claims_model. Dates need care, same tier as claims.
+    calendar_events_model: str = "sonnet"
+    calendar_events_interval_minutes: int = 20
+    calendar_events_lookback_days: int = 3
+    calendar_event_default_duration_minutes: int = 60
+    calendar_event_max_future_days: int = 180
+    calendar_event_max_past_days: int = 2
+    calendar_events_max_per_signal: int = 3
+    calendar_events_max_attempts: int = 3
+    calendar_events_min_confidence: float = 0.6
+
     @property
     def raw_ttl_seconds(self) -> int:
         return self.raw_ttl_days * 24 * 3600

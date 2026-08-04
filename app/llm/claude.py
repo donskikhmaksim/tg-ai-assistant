@@ -1147,6 +1147,206 @@ async def generate_claims_batch(
         return []
 
 
+# ── Calendar events batch extraction (see app/pipeline/calendar_events.py
+# for the caller/flow, and that module's docstring §0 for the real
+# calendar-mcp constraints this schema/prompt is shaped around) ────────────
+# app/pipeline/calendar_events.py runs one of these per tick over already-
+# triaged signals — same batching principle as score_triage_batch /
+# generate_claims_batch: one call per tick, never one call per signal.
+
+CALENDAR_EVENTS_SYSTEM = (
+    "You extract CALENDAR EVENTS — meetings, calls, visits, appointments, "
+    "trips with a specific time/date binding — from a batch of SIGNALS, "
+    "each one a chunk of a Telegram chat's activity (a day's worth of "
+    "messages with one counterparty or group) from a personal task "
+    "pipeline. Content may be in Russian or English.\n\n"
+    "A TASK DEADLINE (\"send the report by Friday\", \"pay the invoice next "
+    "week\") is NOT a calendar event — deadlines are handled by a SEPARATE "
+    "system (TickTick tasks) and must NEVER be duplicated here. Only "
+    "extract something with an actual scheduled meeting/call/visit/trip "
+    "shape. There is deliberately no \"deadline\" category in the output "
+    "schema — if the only time-bound thing in a signal is a deadline, "
+    "return an empty events list for it.\n\n"
+    "For EACH signal you may return ZERO, ONE, or SEVERAL events (rare — "
+    "only when the signal genuinely describes more than one distinct "
+    "meeting/call/visit).\n\n"
+    "Each signal is given with its own ANCHOR — the local day-of-week, "
+    "date, time, and IANA timezone of that signal's own activity (NOT the "
+    "current time). Resolve every relative time expression (\"in three "
+    "hours\", \"tomorrow at 3pm\", \"on Thursday\") ONLY against THAT "
+    "signal's own anchor, never any other signal's anchor and never "
+    "'today' in some absolute sense.\n\n"
+    "start is REQUIRED and must be absolute (resolved against the anchor). "
+    "If the day is clear from the source but no time is given, set "
+    "all_day=true and start to a bare YYYY-MM-DD date. If even the day "
+    "is unclear, do NOT return that event at all — leave it out of the "
+    "events list entirely rather than guessing.\n\n"
+    "end is set ONLY when the source explicitly names an end time/date — "
+    "otherwise null (a default duration is applied downstream, not by "
+    "you).\n\n"
+    "evidence_quote must be a VERBATIM substring of that signal's own "
+    "summary text, unedited, at most 200 characters — never a paraphrase, "
+    "never text from a different signal.\n\n"
+    "counterparty is the person/role exactly as the source names them "
+    "(a name, a role, \"клиент\", whatever was actually said) — never "
+    "resolve it to a real identity, never invent a name that wasn't said. "
+    "null when nobody was named.\n\n"
+    "Never invent a time, place, or person that is not actually present in "
+    "the source text. When genuinely unsure whether something is really a "
+    "scheduled event, prefer to leave it out (empty events list) rather "
+    "than guess.\n\n"
+    "Return exactly one result object per signal, using its given 0-based "
+    "index, even when its events list is empty."
+)
+
+CALENDAR_EVENTS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "events": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "activity_type": {
+                                    "type": "string",
+                                    "enum": [
+                                        "meeting", "call", "visit", "appointment",
+                                        "trip", "other",
+                                    ],
+                                },
+                                "counterparty": {"type": ["string", "null"]},
+                                "start": {
+                                    "type": "string",
+                                    "description": "RFC3339 with an offset, or "
+                                    "YYYY-MM-DD when all_day is true.",
+                                },
+                                "end": {"type": ["string", "null"]},
+                                "all_day": {"type": "boolean"},
+                                "evidence_quote": {"type": ["string", "null"]},
+                                "confidence": {"type": "number"},
+                                "needs_clarification": {"type": "boolean"},
+                            },
+                            "required": [
+                                "activity_type", "counterparty", "start", "end",
+                                "all_day", "evidence_quote", "confidence",
+                                "needs_clarification",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["index", "events"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
+_CALENDAR_EVENTS_MAX_TOKENS = 4000
+
+_CALENDAR_EVENTS_CLI_INSTRUCTION = (
+    "\n\n# OUTPUT FORMAT (STRICT)\n"
+    "Return ONLY a single JSON object that validates against this JSON Schema. "
+    "No prose, no explanation, no markdown, no code fences — just the raw JSON object.\n"
+    "JSON Schema:\n" + json.dumps(CALENDAR_EVENTS_SCHEMA, ensure_ascii=False)
+)
+
+
+def _calendar_signal_line(index: int, item: dict[str, Any]) -> str:
+    parts = [f"{index}. [{item.get('source') or '?'}] {item.get('title') or '(no title)'}"]
+    if item.get("anchor_local"):
+        parts.append(f"   anchor: {item['anchor_local']}")
+    participants = item.get("participants_raw") or []
+    if participants:
+        parts.append(f"   participants: {', '.join(participants)}")
+    if item.get("summary"):
+        parts.append(f"   summary: {item['summary']}")
+    return "\n".join(parts)
+
+
+async def extract_calendar_events_batch(
+    items: list[dict[str, Any]], tz_name: str
+) -> list[dict[str, Any]]:
+    """One Claude call extracting calendar-event candidates for a WHOLE
+    batch of signals at once — same batching principle as
+    score_triage_batch/generate_claims_batch.
+
+    `items`: [{title, summary, participants_raw, source, ts_start,
+    anchor_local}], index-aligned with the caller's signal list (see
+    app/pipeline/calendar_events.py::run_calendar_events_tick, which builds
+    `anchor_local` from each signal's own ts_start converted into
+    `tz_name`). `tz_name` is accepted for signature symmetry with the
+    caller/future use (e.g. embedding it once in the system prompt instead
+    of per-signal) — the per-signal anchor line is what actually carries
+    the resolvable timezone context today.
+
+    Returns the raw list of per-signal results the model produced —
+    [{index, events: [...]}, ...], NOT guaranteed to have one entry per
+    input item. Returns [] on ANY failure (transport, parse, shape) —
+    fail-open, same contract as score_triage_batch/generate_claims_batch:
+    the caller must treat a missing index as "not extracted this tick",
+    never invent events.
+    """
+    if not items:
+        return []
+    s = get_settings()
+    user = (
+        "# SIGNALS\n"
+        + "\n".join(_calendar_signal_line(i, it) for i, it in enumerate(items))
+        + "\n"
+    )
+    try:
+        if s.claude_cli_url:
+            payload = {
+                "system": CALENDAR_EVENTS_SYSTEM,
+                "prompt": user + _CALENDAR_EVENTS_CLI_INSTRUCTION,
+                "model": (s.calendar_events_model or s.claude_cli_model),
+            }
+            headers = {"Authorization": f"Bearer {s.claude_cli_token}"}
+            async with httpx.AsyncClient(timeout=s.claude_cli_timeout) as client:
+                r = await client.post(s.claude_cli_url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"claude-cli shim error: {data.get('error')!r}")
+            raw = _parse_json_loose(data.get("result") or "")
+        else:
+            resp = await _get_client().messages.create(
+                model=resolve_api_model(s.calendar_events_model),
+                max_tokens=_CALENDAR_EVENTS_MAX_TOKENS,
+                thinking={"type": "adaptive"},
+                output_config={
+                    "effort": "medium",
+                    "format": {"type": "json_schema", "schema": CALENDAR_EVENTS_SCHEMA},
+                },
+                system=[
+                    {
+                        "type": "text",
+                        "text": CALENDAR_EVENTS_SYSTEM,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), None)
+            if text is None:
+                raise ValueError(f"no text block (stop_reason={resp.stop_reason})")
+            raw = json.loads(text)
+        results = raw.get("results")
+        return results if isinstance(results, list) else []
+    except Exception:  # noqa: BLE001 — fail-open: [] means "nothing extracted this tick"
+        logger.warning("extract_calendar_events_batch failed", exc_info=True)
+        return []
+
+
 async def healthcheck() -> tuple[bool, str]:
     """Canary for the daily watchdog that exercises the SAME tier-2 path as
     extract(): the CLI shim when claude_cli_url is set (catches a dead shim, e.g.

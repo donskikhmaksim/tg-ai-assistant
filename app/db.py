@@ -40,6 +40,16 @@ app/pipeline/claim_dedup.py + app/pipeline/claims.py):
                     needs_due_clarification, project, with_whom,
                     needs_clarification, verdict: auto|decision, created_at}
                     — see app/pipeline/claims.py
+  calendar_events — captured calendar events {event_key (unique, content
+                    hash — see app/pipeline/calendar_events.py's module
+                    docstring §1), signal_ids, chat_ids, title,
+                    activity_type, counterparty, start, end, all_day,
+                    time_zone, description, evidence_quote, quote_verified,
+                    confidence, needs_clarification, status: pending|
+                    created|failed|skipped, skip_reason, google_event_id,
+                    google_html_link, calendar_id, account, attempts,
+                    last_error, created_at, updated_at, synced_at} — see
+                    app/pipeline/calendar_events.py + app/calendar_mcp.py
   embedding_failures — one row per failed app/embeddings.py::embed() call
                     {ts, error, textCount}, TTL-expired on `ts` (reuses
                     audit_ttl_seconds). Makes the embed() fail-soft path's
@@ -164,6 +174,20 @@ async def _ensure_indexes(
     # this collection's own idempotency/lookup key (same convention as
     # omi-task-extractor's Repo.ensure_indexes).
     await db.claims.create_index("claim_id", unique=True)
+
+    # `calendar_events` (app/pipeline/calendar_events.py): event_key is the
+    # content-hash idempotency key described in that module's docstring §1
+    # — unique so a re-extraction of the same signal can only ever upsert,
+    # never insert a duplicate. Supporting indexes serve the create-phase
+    # pending queue (get_pending_calendar_events) and lookups by member
+    # signal.
+    await db.calendar_events.create_index("event_key", unique=True)
+    await db.calendar_events.create_indexes(
+        [
+            IndexModel([("status", ASCENDING), ("created_at", DESCENDING)]),
+            IndexModel([("signal_ids", ASCENDING)]),
+        ]
+    )
 
     # `embedding_failures`: visibility into embed()'s fail-soft path (see
     # app/embeddings.py + app/repositories.py::record_embedding_failure).

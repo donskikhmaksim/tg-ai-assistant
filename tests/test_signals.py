@@ -260,6 +260,39 @@ def test_upsert_signal_unset_removes_stale_triage_and_claimed(monkeypatch):
     assert "claimed" not in stored
 
 
+def test_stale_on_content_change_includes_calendar_extracted():
+    """A content-changed bucket (see _bucket_changed/ingest_telegram_signals)
+    must invalidate calendar_extracted alongside triage/claimed — otherwise
+    a re-ingested bucket with new activity would never get a second shot at
+    calendar-events extraction (see app/pipeline/calendar_events.py's module
+    docstring §1 for why re-extracting is SAFE — event_key is a content
+    hash, not source_id-based, so it upserts rather than duplicating)."""
+    assert signals._STALE_ON_CONTENT_CHANGE == ["triage", "claimed", "calendar_extracted"]
+
+
+def test_upsert_signal_unset_removes_stale_calendar_extracted(monkeypatch):
+    db = _use_fake_db(
+        monkeypatch,
+        signals_docs=[
+            {
+                "source": "telegram", "source_id": "user_1:2026-08-03",
+                "title": "T", "calendar_extracted": True,
+            }
+        ],
+    )
+
+    _run(
+        signals.upsert_signal(
+            {"source": "telegram", "source_id": "user_1:2026-08-03", "title": "T2"},
+            unset=signals._STALE_ON_CONTENT_CHANGE,
+        )
+    )
+
+    stored = db.signals.docs[0]
+    assert stored["title"] == "T2"
+    assert "calendar_extracted" not in stored
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _bucket_changed (pure) — the "should we invalidate triage/claimed" check
 # ─────────────────────────────────────────────────────────────────────────────

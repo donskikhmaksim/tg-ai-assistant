@@ -14,6 +14,7 @@ from .backup.mongo_backup import run_mongo_backup
 from .config import get_settings
 from .db import close_db, init_db
 from .pipeline.batch import run_batch
+from .pipeline.calendar_events import run_calendar_events_tick
 from .pipeline.claims import run_claims_tick
 from .pipeline.summary import run_daily_summary
 from .pipeline.triage import run_triage_tick
@@ -102,6 +103,25 @@ async def main() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("claims tick failed")
 
+    async def calendar_events_job() -> None:
+        """Turn triaged-but-not-yet-calendar_extracted `signals` into
+        `calendar_events` rows on the isolated "AI Captured" Google
+        Calendar (see app/pipeline/calendar_events.py). Extraction + Mongo
+        bookkeeping always run; the real Google write is separately gated
+        by CALENDAR_EVENTS_ENABLED (see run_calendar_events_tick). Runs
+        independently of claims_job — both read the same triaged signals
+        pool but write to disjoint collections (claims vs calendar_events)
+        with their own `claimed`/`calendar_extracted` flags, so there is no
+        ordering dependency between them."""
+        try:
+            extracted, created = await run_calendar_events_tick(settings)
+            logger.info(
+                "Calendar events: extracted %d signal(s), created %d event(s) on Google",
+                extracted, created,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("calendar events tick failed")
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         run_batch,
@@ -135,11 +155,29 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        calendar_events_job,
+        "interval",
+        minutes=settings.calendar_events_interval_minutes,
+        id="calendar_events",
+        max_instances=1,
+        coalesce=True,
+    )
     logger.info(
         "Signals+triage+claims scheduled: ingest every %d min, triage every %d min, "
         "claims every %d min",
         settings.signals_ingest_interval_minutes, settings.triage_interval_minutes,
         settings.claims_interval_minutes,
+    )
+    calendar_creation_on = bool(
+        settings.calendar_events_enabled
+        and settings.calendar_mcp_url
+        and settings.calendar_target_calendar_id
+    )
+    logger.info(
+        "Calendar events: extraction ON (every %d min), creation %s",
+        settings.calendar_events_interval_minutes,
+        "ON" if calendar_creation_on else "OFF",
     )
     scheduler.start()
     logger.info("Batch scheduler started: every %d min", settings.batch_interval_min)
