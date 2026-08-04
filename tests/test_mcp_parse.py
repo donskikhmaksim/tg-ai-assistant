@@ -2,6 +2,7 @@ import asyncio
 
 from app.ticktick.mcp_client import (
     TickTickMCP,
+    _chat_id_from_content,
     _parse_pairs,
     _parse_project_cards,
     _parse_projects,
@@ -228,3 +229,138 @@ def test_find_task_id_exclude_skips_already_claimed_id():
     # once both are excluded, nothing is left to bind to
     third = asyncio.run(tt.find_task_id("Позвонить в банк", exclude={first, second}))
     assert third is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _chat_id_from_content / find_task_id_for_chat — chat-of-origin disambiguation
+# (see scripts/push_local_tasks.py and app/pipeline/batch.py `_chat_link`).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_chat_id_from_content_extracts_and_unquotes():
+    content = "[💬 Прочитать переписку](https://x/chat?c=user_123%3A456&t=abc)"
+    assert _chat_id_from_content(content) == "user_123:456"
+
+
+def test_chat_id_from_content_none_when_no_marker():
+    assert _chat_id_from_content("Просто текст без ссылки, без метки чата") is None
+    assert _chat_id_from_content(None) is None
+    assert _chat_id_from_content("") is None
+
+
+_TWO_SAME_TITLE_WITH_MARKERS = (
+    "Task 1:\n"
+    "ID: TASKA\n"
+    "Title: Позвонить в банк\n"
+    "Project ID: proj1\n"
+    "Status: Active\n"
+    "\n"
+    "Content:\n"
+    "[💬 Прочитать переписку](https://x/chat?c=chatA&t=tok1)\n"
+    "\n"
+    "Task 2:\n"
+    "ID: TASKB\n"
+    "Title: Позвонить в банк\n"
+    "Project ID: proj1\n"
+    "Status: Active\n"
+    "\n"
+    "Content:\n"
+    "[💬 Прочитать переписку](https://x/chat?c=chatB&t=tok2)\n"
+)
+
+_TWO_SAME_TITLE_NO_MARKERS = (
+    "Task 1:\n"
+    "ID: TASKA\n"
+    "Title: Позвонить в банк\n"
+    "Project ID: proj1\n"
+    "Status: Active\n"
+    "\n"
+    "Task 2:\n"
+    "ID: TASKB\n"
+    "Title: Позвонить в банк\n"
+    "Project ID: proj1\n"
+    "Status: Active\n"
+)
+
+
+def test_find_task_id_for_chat_disambiguates_via_embedded_chat_marker():
+    """Two TickTick tasks share the exact title but carry different embedded
+    chat-of-origin markers — the doc's chatId must pick the RIGHT one, not
+    whichever comes first positionally."""
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        assert name == "get_project_tasks"
+        return _TWO_SAME_TITLE_WITH_MARKERS
+
+    tt.call = fake_call  # type: ignore[assignment]
+    tid, ambiguous = asyncio.run(
+        tt.find_task_id_for_chat("Позвонить в банк", "chatB", "proj1")
+    )
+    assert tid == "TASKB"
+    assert ambiguous is False
+
+    tid2, ambiguous2 = asyncio.run(
+        tt.find_task_id_for_chat("Позвонить в банк", "chatA", "proj1")
+    )
+    assert tid2 == "TASKA"
+    assert ambiguous2 is False
+
+
+def test_find_task_id_for_chat_ambiguous_when_no_markers_present():
+    """Same-titled collision but NEITHER candidate carries a chat marker (e.g.
+    created before WEBAPP_URL was configured) — there is no data to
+    disambiguate with, so the result must be flagged ambiguous=True rather
+    than silently pretending to know which is which."""
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        return _TWO_SAME_TITLE_NO_MARKERS
+
+    tt.call = fake_call  # type: ignore[assignment]
+    tid, ambiguous = asyncio.run(
+        tt.find_task_id_for_chat("Позвонить в банк", "chatA", "proj1")
+    )
+    assert tid in {"TASKA", "TASKB"}  # still resolves SOMETHING (no doc left stranded)
+    assert ambiguous is True
+
+
+def test_find_task_id_for_chat_single_candidate_is_not_ambiguous():
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        return (
+            "Task 1:\n"
+            "ID: TASKA\n"
+            "Title: Купить молоко\n"
+            "Project ID: proj1\n"
+            "Status: Active\n"
+        )
+
+    tt.call = fake_call  # type: ignore[assignment]
+    tid, ambiguous = asyncio.run(
+        tt.find_task_id_for_chat("Купить молоко", "chatA", "proj1")
+    )
+    assert tid == "TASKA"
+    assert ambiguous is False
+
+
+def test_find_task_id_for_chat_falls_back_to_global_search_without_project_hits():
+    """No candidates in the given project's card dump (e.g. wrong/missing
+    project_id) — falls back to the plain exact-title search, same as the
+    pre-existing find_task_id() behaviour."""
+    tt = TickTickMCP(url="http://x")
+
+    async def fake_call(name, args):
+        if name == "get_project_tasks":
+            return "Found 0 tasks in project 'x':"
+        if name == "search_tasks":
+            return "- [Inbox] Купить молоко  (id:GLOBAL1 proj:p)"
+        raise AssertionError(f"unexpected call: {name}")
+
+    tt.call = fake_call  # type: ignore[assignment]
+    tid, ambiguous = asyncio.run(
+        tt.find_task_id_for_chat("Купить молоко", "chatA", "proj1")
+    )
+    assert tid == "GLOBAL1"
+    assert ambiguous is False

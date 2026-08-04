@@ -28,6 +28,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import unquote
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -226,6 +227,26 @@ def _parse_projects(text: str) -> list[dict[str, str]]:
     return _parse_pairs(text)
 
 
+# The batch pipeline (app/pipeline/batch.py `_chat_link`) stamps a deep link on
+# every task it creates: "...?c=<urlencoded chat_id>&t=<token>[&m=<ids>]" —
+# rendered as `[💬 Прочитать переписку](<link>)` inside the task's content.
+# This is the ONLY marker that ties a TickTick task back to its source chat;
+# it only exists when WEBAPP_URL was configured at creation time (see
+# `_chat_link`, which returns None otherwise — in which case no link, and no
+# marker, is ever written).
+_CHAT_LINK_RE = re.compile(r"[?&]c=([^&)\s]+)")
+
+
+def _chat_id_from_content(content: str | None) -> str | None:
+    """Recover the source chat_id embedded in a task's content by the batch
+    pipeline's deep link (see `_CHAT_LINK_RE`), or None if that marker isn't
+    present. None means "no signal available" — NOT "no match" — most tasks
+    predating WEBAPP_URL (or created on a deploy that never set it) will
+    always return None here."""
+    m = _CHAT_LINK_RE.search(content or "")
+    return unquote(m.group(1)) if m else None
+
+
 class TickTickMCP:
     """Thin async wrapper. Opens a fresh session per call — connection volume
     is low (a handful of bind/batch operations) and per-call sessions avoid
@@ -386,6 +407,64 @@ class TickTickMCP:
             if m_title and m_title.group(1).strip().lower() == needle:
                 return tid
         return None
+
+    async def find_task_id_for_chat(
+        self,
+        title: str,
+        chat_id: str | None,
+        project_id: str | None,
+        exclude: set[str] | None = None,
+    ) -> tuple[str | None, bool]:
+        """Resolve a task id for `title`, preferring the TickTick task whose
+        embedded chat-of-origin marker (`_chat_id_from_content`) matches
+        `chat_id`, over a bare exact-title match.
+
+        LIMITATION (by nature of the data, not a bug): this can only
+        disambiguate when the candidate task actually carries that marker —
+        the batch pipeline only stamps it when WEBAPP_URL was configured at
+        creation time (see `_chat_id_from_content`). A task created before
+        that, or on a deploy that never set WEBAPP_URL, carries nothing that
+        ties it back to a chat; for those there is no chat-of-origin data to
+        disambiguate with at all, and this degrades to the same title-only
+        search as `find_task_id()`.
+
+        Returns `(task_id, ambiguous)`. `ambiguous=True` means several
+        TickTick tasks in `project_id` share this exact title and the chat
+        marker did NOT single one out (absent on all of them, or present on
+        more than one) — the id returned (if any) is a best-effort positional
+        pick, not a proven match, and the caller should log a warning so a
+        human can verify the binding instead of trusting it silently.
+        """
+        exclude = exclude or set()
+        cards: list[dict[str, str]] = []
+        if project_id:
+            cards = await self.get_project_tasks(project_id, limit=500)
+        needle = title.strip().lower()
+        same_title = [
+            c for c in cards
+            if c.get("title", "").strip().lower() == needle and c.get("id") not in exclude
+        ]
+        if not same_title:
+            # No candidates found via this project's card dump (wrong/missing
+            # project_id, task filed elsewhere, or get_project_tasks failed) —
+            # fall back to the plain global exact-title search.
+            return await self.find_task_id(title, exclude=exclude), False
+
+        if len(same_title) == 1:
+            return same_title[0]["id"], False
+
+        if chat_id:
+            chat_matches = [
+                c for c in same_title
+                if _chat_id_from_content(c.get("content")) == chat_id
+            ]
+            if len(chat_matches) == 1:
+                return chat_matches[0]["id"], False
+
+        # Multiple same-titled candidates and the chat marker didn't cleanly
+        # single one out — pick the first remaining one so no doc is left
+        # unreconciled, but flag it as an unverified guess.
+        return same_title[0]["id"], True
 
     async def get_project_tasks(
         self, project_id: str, limit: int = 200
