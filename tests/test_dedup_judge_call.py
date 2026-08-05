@@ -217,3 +217,95 @@ def test_judged_distinct_is_still_created(monkeypatch):
 
     assert inserted == [_new_task()["task"]]
     assert tt.created == [_new_task()["task"]]
+
+
+# ── DEDUP_SAFETY_NET: fallback when the judge CALL itself is unavailable ──
+# (raises/times out/errors — as opposed to genuinely answering "different").
+# See app/pipeline/semantic_dedup.py::decide_duplicate for the actual logic;
+# these tests pin the end-to-end wiring through _create_new_tasks.
+
+_NEW_TITLE = _new_task()["task"]
+_EXISTING_TITLE = _existing_open_task()["task"]
+
+
+def _vec(cosine: float) -> list[float]:
+    """A 2D unit vector whose cosine similarity with [1.0, 0.0] is `cosine`."""
+    return [cosine, (1.0 - cosine * cosine) ** 0.5]
+
+
+def _patch_pipeline_with_score(monkeypatch, *, cosine: float, judge_fn, inserted):
+    """Like _patch_pipeline, but with controllable cosine (via distinct fixed
+    vectors for the new/existing titles) and a caller-supplied judge."""
+    vecs = {_NEW_TITLE: [1.0, 0.0], _EXISTING_TITLE: _vec(cosine)}
+
+    async def fake_embed(texts):
+        return [vecs.get(t, [1.0, 0.0]) for t in texts]
+
+    async def noop(*a, **kw):
+        return None
+
+    async def get_binding(chat_id):
+        return {"ticktickProjectId": "p1", "projectName": "P", "ticktickSectionId": None}
+
+    async def get_task_vectors(scope):
+        return {}
+
+    async def insert_task_if_new(doc):
+        inserted.append(doc["task"])
+        return True
+
+    monkeypatch.setattr(batch, "embed", fake_embed)
+    monkeypatch.setattr(claude, "judge_same_task", judge_fn)
+    monkeypatch.setattr(batch.repo, "get_project_binding", get_binding)
+    monkeypatch.setattr(batch.repo, "get_task_vectors", get_task_vectors)
+    monkeypatch.setattr(batch.repo, "store_task_vectors", noop)
+    monkeypatch.setattr(batch.repo, "get_chat_settings", lambda *a: _async({}))
+    monkeypatch.setattr(batch.repo, "get_chat_title", lambda *a: _async(None))
+    monkeypatch.setattr(batch.repo, "append_task_details", noop)
+    monkeypatch.setattr(batch.repo, "set_task_ticktick_id", noop)
+    monkeypatch.setattr(batch.repo, "insert_task_if_new", insert_task_if_new)
+
+
+async def _judge_boom(a, b):
+    raise RuntimeError("claude-cli shim unreachable")
+
+
+def test_judge_unavailable_above_safety_net_auto_merges(monkeypatch, caplog):
+    # Judge infra is DOWN (raises) and cosine (0.97) is above DEDUP_SAFETY_NET
+    # (default 0.95, not overridden here) → treated as a duplicate, same as a
+    # judge that said "yes" — must NOT silently flood a near-certain dup.
+    inserted: list[str] = []
+    _patch_pipeline_with_score(monkeypatch, cosine=0.97, judge_fn=_judge_boom, inserted=inserted)
+    tt = _FakeTT()
+
+    with caplog.at_level("WARNING"):
+        _run(batch._create_new_tasks(
+            "group_1", [_new_task()], tt=tt, open_tasks=[_existing_open_task()],
+        ))
+
+    assert inserted == [], "safety-net merge must not insert a second local task"
+    assert tt.created == [], "safety-net merge must not create a second TickTick task"
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("safety-net" in m for m in warnings), (
+        f"expected a WARNING mentioning the safety net, got: {warnings}"
+    )
+
+
+def test_judge_unavailable_below_safety_net_still_creates(monkeypatch, caplog):
+    # Judge infra is DOWN and cosine (0.90) sits above dedup_low but BELOW the
+    # safety net → unchanged fail-safe philosophy: create, don't merge on doubt.
+    inserted: list[str] = []
+    _patch_pipeline_with_score(monkeypatch, cosine=0.90, judge_fn=_judge_boom, inserted=inserted)
+    tt = _FakeTT()
+
+    with caplog.at_level("WARNING"):
+        _run(batch._create_new_tasks(
+            "group_1", [_new_task()], tt=tt, open_tasks=[_existing_open_task()],
+        ))
+
+    assert inserted == [_new_task()["task"]]
+    assert tt.created == [_new_task()["task"]]
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("safety-net" in m for m in warnings), (
+        "must not claim a safety-net merge when the cosine is below the threshold"
+    )

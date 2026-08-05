@@ -188,6 +188,55 @@ def test_decide_boundary_low_inclusive():
     assert _run(decide_duplicate(0.93, LOW, HIGH, _judge_no)) is False
 
 
+# ── decide_duplicate safety net (judge infra unavailable) ───────────────
+SAFETY_NET = 0.95
+
+
+def test_safety_net_merges_when_judge_errors_above_threshold(caplog):
+    # The judge call itself blew up (shim down/timeout) and cosine is at/above
+    # the safety net → auto-merge instead of the usual fail-safe distinct.
+    with caplog.at_level("WARNING", logger="app.pipeline.semantic_dedup"):
+        result = _run(decide_duplicate(0.97, LOW, HIGH, _judge_boom, SAFETY_NET))
+    assert result is True
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("safety-net" in m and "0.970" in m for m in warnings)
+
+
+def test_safety_net_merges_when_judge_returns_none_above_threshold(caplog):
+    # judge_same_task's own contract: unavailable/unparsable → None, no raise.
+    # Must trigger the safety net exactly like an exception does.
+    with caplog.at_level("WARNING", logger="app.pipeline.semantic_dedup"):
+        result = _run(decide_duplicate(0.96, LOW, HIGH, _judge_none, SAFETY_NET))
+    assert result is True
+    assert any("safety-net" in r.message for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_safety_net_does_not_merge_below_threshold(caplog):
+    # Judge unavailable but cosine is below the safety net (still above low) →
+    # unchanged fail-safe behaviour: distinct, no merge, no safety-net log.
+    with caplog.at_level("WARNING", logger="app.pipeline.semantic_dedup"):
+        result = _run(decide_duplicate(0.90, LOW, HIGH, _judge_boom, SAFETY_NET))
+    assert result is False
+    assert not any("safety-net" in r.message for r in caplog.records)
+
+
+def test_safety_net_disabled_by_default_preserves_old_behaviour():
+    # Callers that don't pass safety_net (existing call sites/tests) keep the
+    # old always-distinct-on-doubt behaviour, even at a very high cosine.
+    assert _run(decide_duplicate(0.99, LOW, HIGH, _judge_boom)) is False
+    assert _run(decide_duplicate(0.99, LOW, HIGH, _judge_none)) is False
+
+
+def test_safety_net_never_engages_on_a_normal_judge_answer():
+    # The judge answered fine (true/false) — the safety net must never override
+    # a real verdict, no matter how high the cosine or where the net is set.
+    assert _run(decide_duplicate(0.99, LOW, HIGH, _judge_yes, SAFETY_NET)) is True
+    assert _run(decide_duplicate(0.99, LOW, HIGH, _judge_no, SAFETY_NET)) is False
+    # Even with a safety net set low enough that "no" would otherwise sit
+    # inside its range, a genuine "no" verdict still wins.
+    assert _run(decide_duplicate(0.90, LOW, HIGH, _judge_no, 0.85)) is False
+
+
 # ── project-task line parsing (ticktick client) ──────────────────────────
 def test_parse_task_lines_search_format():
     text = (

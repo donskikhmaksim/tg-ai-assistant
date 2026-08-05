@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     dedup_semantic: str = "on"          # on | off
     dedup_low: float = 0.83             # ≤ this cosine → distinct without a judge call
     dedup_high: float = 0.93            # ≥ this cosine → judged «distinct» gets logged
+    # Safety net for when judge_same_task ITSELF is unavailable (the LLM/shim
+    # call raises, times out, or comes back unparsable — see judge_same_task's
+    # None-on-failure contract in app/llm/claude.py). Normally "judge unavailable"
+    # means decide_duplicate falls back to distinct (create) like any other
+    # doubt. But at a near-certain cosine that fallback risks a silent flood of
+    # real duplicates if the judge infra is down for a while (the 2026-08 judge
+    # regression showed this can go unnoticed). So: ONLY when the judge call
+    # itself failed AND cosine >= dedup_safety_net, auto-merge instead — logged
+    # as a WARNING (not the routine INFO) so it's easy to find/alert on. Does
+    # NOT change anything when the judge answers normally (true/false); below
+    # this threshold an unavailable judge still means distinct, unchanged.
+    dedup_safety_net: float = 0.95
     # Model for the yes/no dedup judge (a single tiny call). CLI-shim alias
     # (sonnet | haiku | opus) or a full API model id; on the API path the aliases
     # map to claude-sonnet-5 / claude-haiku-4-5 / the configured extraction model.

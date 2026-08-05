@@ -112,6 +112,7 @@ async def process_chat(chat_id: str) -> None:
     dedup_semantic = settings_doc.get("dedup_semantic") or s.dedup_semantic
     dedup_low = _as_float(settings_doc.get("dedup_low"), s.dedup_low)
     dedup_high = _as_float(settings_doc.get("dedup_high"), s.dedup_high)
+    dedup_safety_net = _as_float(settings_doc.get("dedup_safety_net"), s.dedup_safety_net)
     # Multi-project routing: [{label, hint, project_id, section_id}] — the model
     # classifies each task into a labelled destination; unlabelled → default.
     routes = _valid_routes(settings_doc.get("routes"))
@@ -175,6 +176,7 @@ async def process_chat(chat_id: str) -> None:
         sem_mode=dedup_semantic,
         sem_low=dedup_low,
         sem_high=dedup_high,
+        sem_safety_net=dedup_safety_net,
         sem_cap=s.dedup_project_task_cap,
         routes=routes,
     )
@@ -643,6 +645,7 @@ async def _create_new_tasks(
     sem_mode: str = "on",
     sem_low: float = 0.83,
     sem_high: float = 0.93,
+    sem_safety_net: float = 0.95,  # kept in sync with Settings.dedup_safety_net's default
     sem_cap: int = 2000,  # kept in sync with Settings.dedup_project_task_cap's default
     routes: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -711,7 +714,9 @@ async def _create_new_tasks(
                 async def _judge(_a=new_card, _b=match_card):
                     return await claude.judge_same_task(_a, _b)
 
-                if await sd.decide_duplicate(match["score"], sem_low, sem_high, _judge):
+                if await sd.decide_duplicate(
+                    match["score"], sem_low, sem_high, _judge, sem_safety_net,
+                ):
                     await _enrich_duplicate(chat_id, match, t, tt)
                     logger.info(
                         "Chat %s: semantic duplicate (%.3f) of %r — enriched, not creating: %s",
