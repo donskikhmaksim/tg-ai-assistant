@@ -475,6 +475,25 @@ async def _build_semantic_dedup(
     return candidates, title_vecs
 
 
+def _judge_card(title: str | None, details: str | None, due: str | None) -> str:
+    """A multi-line task CARD for the dedup judge: title + details + due.
+
+    judge_same_task() is documented to weigh every field and is far more precise
+    on full cards than on bare titles — with only titles it cannot tell "same
+    task, one side just spells out the channel/time" from "different URL/amount
+    buried in the details", and it defaults to «different» (creating a duplicate).
+    Empty fields are simply omitted, so a card with nothing but a title degrades
+    to exactly the old bare-title behaviour."""
+    parts = [(title or "").strip()]
+    extra = (details or "").strip()
+    if extra:
+        parts.append(f"Детали: {extra}")
+    when = (due or "").strip()
+    if when:
+        parts.append(f"Срок: {when}")
+    return "\n".join(p for p in parts if p)
+
+
 def _should_transfer_deadline(new_task: dict[str, Any], match: dict[str, Any]) -> bool:
     """True when the NEW (duplicate) task carries a deadline and the matched
     EXISTING task has none recorded — neither a TickTick due date ("due" on
@@ -673,15 +692,24 @@ async def _create_new_tasks(
         t_project_name = f"route:{route['label']}" if route else project_name
 
         # Semantic dedup: compare against the single best-matching existing task
-        # (this chat's open tasks or the bound project) and decide by band —
-        # ≥high auto-duplicate, ≤low distinct, gray zone asks the LLM judge.
+        # (this chat's open tasks or the bound project). ≤low → distinct without
+        # a call; ABOVE low the LLM judge decides (a high cosine alone never
+        # auto-merges — see semantic_dedup.decide_duplicate). The judge gets full
+        # CARDS, not bare titles, so it can actually see what differs.
         # Bias to safe: any uncertainty → create (never drop a real task).
         qvec = title_vecs.get(title) if matcher is not None else None
         if matcher is not None and qvec is not None:
             match = sd.best_match(qvec, matcher, sem_low)
             if match is not None:
-                async def _judge(_title=title, _match_title=match.get("title")):
-                    return await claude.judge_same_task(_title, _match_title)
+                new_card = _judge_card(title, t.get("details"), t.get("deadline"))
+                match_card = _judge_card(
+                    match.get("title"),
+                    match.get("details"),
+                    match.get("due") or match.get("deadline"),
+                )
+
+                async def _judge(_a=new_card, _b=match_card):
+                    return await claude.judge_same_task(_a, _b)
 
                 if await sd.decide_duplicate(match["score"], sem_low, sem_high, _judge):
                     await _enrich_duplicate(chat_id, match, t, tt)
@@ -690,6 +718,16 @@ async def _create_new_tasks(
                         chat_id, match["score"], match.get("title"), title,
                     )
                     continue
+                # A near-identical pair the judge split apart is the exact shape of
+                # the 2026-08-05 duplicate flood (judge said «different» on every
+                # rewording). Log it so the next regression is visible in prod logs
+                # instead of silently becoming a second TickTick task.
+                if match["score"] >= sem_high:
+                    logger.info(
+                        "Chat %s: high cosine (%.3f) but judge says DISTINCT — creating "
+                        "anyway: %r vs existing %r",
+                        chat_id, match["score"], title, match.get("title"),
+                    )
 
         dedup = repo.dedup_hash(chat_id, title)
         task_doc = {

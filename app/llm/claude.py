@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -472,19 +473,23 @@ _JUDGE_SYSTEM = (
     "You compare two to-do task CARDS for a task manager. Each card may carry a "
     "title plus extra fields (details/notes, due date, tags, project). Decide "
     "whether they are the SAME actionable task — the same concrete thing to "
-    "actually do — merely worded differently or with extra detail. "
-    "Weigh ALL fields, not just the title: a difference in ANY distinguishing "
-    "detail means NOT the same — a different URL/link, a different number or "
-    "amount, a different date/period, a different object, place, or person. "
-    "(E.g. two 'watch this reel' cards with different links are DIFFERENT; "
-    "'декларация за 2025' vs 'за 2026' are DIFFERENT.)\n"
-    "CRUCIAL — shared entity is NOT sameness. Tasks about the same order, invoice, "
-    "person, company, or project but describing a DIFFERENT action or a different "
-    "STAGE of a process are DIFFERENT tasks: approve ≠ pay ≠ track ≠ confirm "
-    "receipt; buy ≠ stock ≠ set up; two payments of different amounts are two "
-    "tasks. Only say the same when it is literally the same action on the same "
-    "object with no distinguishing detail — merely reworded. Conversely, the same "
-    "underlying action counts as the SAME even if titles are phrased differently. "
+    "actually do — merely worded differently or captured with more/less detail.\n"
+    "DIFFERENT means a CONFLICT: both cards name the same kind of fact but with "
+    "DIFFERENT values — a different URL/link, a different number or amount, a "
+    "different date/period, a different object, place, or person. (Two 'watch this "
+    "reel' cards with different links are DIFFERENT; 'декларация за 2025' vs "
+    "'за 2026' are DIFFERENT.)\n"
+    "CRUCIAL — shared entity is NOT sameness. A different ACTION or a different "
+    "STAGE of a process is DIFFERENT even when the order, invoice, person, company "
+    "or project is the same: approve ≠ pay ≠ track ≠ confirm receipt; buy ≠ stock "
+    "≠ set up; two payments of different amounts are two tasks.\n"
+    "EXTRA DETAIL ON ONE SIDE IS NOT A CONFLICT. The same task is routinely "
+    "captured twice with different completeness — one card carries a clarification "
+    "the other lacks (a parenthetical, a channel, a time, a reason, a longer "
+    "wording). If one card's content is contained in the other and NOTHING "
+    "contradicts, they are the SAME task. ('Выслать эстимейт Джозефу' vs 'Выслать "
+    "эстимейт Джозефу на почту' — SAME. 'Позвонить риелтору' vs 'Позвонить "
+    "риелтору (после 16:30)' — SAME.)\n"
     "Answer with a single word: yes or no."
 )
 
@@ -496,12 +501,17 @@ _JUDGE_API_MODELS = {
 
 
 def _parse_yes_no(text: str) -> bool | None:
-    t = (text or "").strip().lower()
-    if t.startswith("yes"):
-        return True
-    if t.startswith("no"):
-        return False
-    return None
+    """The judge's verdict, or None when it didn't actually answer.
+
+    The prompt asks for a single word, but on multi-line task cards the model
+    sometimes prefixes a few words ("Task A and B describe… yes"). A strict
+    startswith() read those as "no answer" → None → distinct → a duplicate got
+    created anyway, which is exactly the silent failure this parser must not
+    reproduce. So: take the FIRST standalone yes/no token anywhere in the reply
+    (word boundaries, so "not"/"nothing" never counts as "no"); still None when
+    neither appears, keeping the fail-safe contract."""
+    m = re.search(r"\b(yes|no)\b", (text or "").lower())
+    return None if m is None else m.group(1) == "yes"
 
 
 async def judge_same_task(a: str, b: str) -> bool | None:

@@ -63,20 +63,22 @@ class Settings(BaseSettings):
     # (Mongo) and the tasks already in the bound TickTick project. A single cosine
     # threshold isn't safe (real dups sit ~0.86 while distinct-but-related tasks
     # reach ~0.83), and a FALSE merge is worse than a missed dup — it SKIPS
-    # creating the task, dropping a real one. So we use THREE bands against the
-    # single best-matching existing task:
-    #   cosine ≥ dedup_high            → duplicate (auto; enrich + skip, no LLM)
-    #   cosine ≤ dedup_low             → distinct  (create)
-    #   dedup_low < cosine < dedup_high → gray zone → a cheap LLM judge decides
+    # creating the task, dropping a real one. So cosine only GATES the LLM call
+    # against the single best-matching existing task:
+    #   cosine ≤ dedup_low  → distinct (create; no LLM call at all)
+    #   cosine >  dedup_low → the cheap LLM judge decides, ALWAYS
+    # A high cosine does NOT auto-merge (see semantic_dedup.decide_duplicate):
+    # cards differing only in a URL/number sit ≥0.93 yet are distinct. dedup_high
+    # therefore no longer gates a merge — it only marks the band where a judged
+    # «distinct» is suspicious enough to log (batch.py).
     # On ANY uncertainty (judge errors/times out, embeddings or LLM unavailable)
-    # we CREATE — never drop a real task on doubt; only the ≥high band auto-merges
-    # without the judge. Falls back to the exact-title hash dedup when off or
-    # embeddings are down. All knobs are global + per-chat overridable (string-
-    # parsed, like control_mode).
+    # we CREATE — never drop a real task on doubt. Falls back to the exact-title
+    # hash dedup when off or embeddings are down. All knobs are global + per-chat
+    # overridable (string-parsed, like control_mode).
     dedup_semantic: str = "on"          # on | off
-    dedup_low: float = 0.83             # ≤ this cosine → definitely distinct
-    dedup_high: float = 0.93            # ≥ this cosine → definitely duplicate
-    # Model for the gray-zone yes/no judge (a single tiny call). CLI-shim alias
+    dedup_low: float = 0.83             # ≤ this cosine → distinct without a judge call
+    dedup_high: float = 0.93            # ≥ this cosine → judged «distinct» gets logged
+    # Model for the yes/no dedup judge (a single tiny call). CLI-shim alias
     # (sonnet | haiku | opus) or a full API model id; on the API path the aliases
     # map to claude-sonnet-5 / claude-haiku-4-5 / the configured extraction model.
     dedup_judge_model: str = "sonnet"
