@@ -285,8 +285,17 @@ class TickTickMCP:
 
         The server echoes the created project as a formatted block; we recover
         the id from either the `ID:`/`(id: …)` line or, failing that, by looking
-        it up by name in get_projects. Returns None if it can't be resolved."""
-        text = await self.call("create_project", {"name": name})
+        it up by name in get_projects. Returns None if it can't be resolved.
+
+        `automation_key` — this is called from the owner-authenticated Mini App
+        form (POST /api/project), not from an interactive chat assistant that
+        could relay a manifest_id/user_reply round-trip, so it goes through the
+        same automation bypass as create_tasks (2026-08-05, when ticktick-mcp
+        removed the tier-🟢 no-gate exemption — without this the call would
+        silently return a plan preview instead of the created project)."""
+        text = await self.call(
+            "create_project", {"name": name, "automation_key": self._automation_key}
+        )
         pid = _any_id(text)
         if pid:
             return pid
@@ -299,9 +308,13 @@ class TickTickMCP:
         """Create a section (kanban column) inside a project and return its id.
 
         Recovers the id from the tool's echoed block, falling back to a
-        list_project_columns lookup by name. Returns None if unresolved."""
+        list_project_columns lookup by name. Returns None if unresolved.
+
+        `automation_key` — same reasoning as create_project above: called from
+        the owner-authenticated Mini App form, not an interactive chat."""
         text = await self.call(
-            "create_project_column", {"project_id": project_id, "name": name}
+            "create_project_column",
+            {"project_id": project_id, "name": name, "automation_key": self._automation_key},
         )
         cid = _any_id(text)
         if cid:
@@ -494,7 +507,12 @@ class TickTickMCP:
         The server tool signature is (task_title, text, project_id, task_id) —
         `task_title` is display-only (confirmation dialog) but REQUIRED, and the
         body param is `text`, not `content`. We used to send {content,…} and
-        every call failed schema validation silently."""
+        every call failed schema validation silently.
+
+        `automation_key` — called from the batch dedup-enrich pipeline
+        (app/pipeline/batch.py), no interactive chat to relay a manifest_id/
+        user_reply round-trip, so same automation bypass as create_tasks
+        (2026-08-05, tier-🟢 no-gate exemption removed on ticktick-mcp)."""
         return await self.call(
             "add_task_comment",
             {
@@ -502,6 +520,7 @@ class TickTickMCP:
                 "text": content,
                 "project_id": project_id,
                 "task_id": task_id,
+                "automation_key": self._automation_key,
             },
         )
 

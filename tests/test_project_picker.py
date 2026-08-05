@@ -20,7 +20,9 @@ def test_create_project_recovers_echoed_id():
     tt = TickTickMCP(url="http://x")
 
     async def fake_call(name, args):
-        assert name == "create_project" and args == {"name": "Fix&Roll"}
+        assert name == "create_project" and args == {
+            "name": "Fix&Roll", "automation_key": tt._automation_key,
+        }
         return "Project 'Fix&Roll' created\n(id: 69f841179f1911020b96a62b)"
 
     tt.call = fake_call  # type: ignore[assignment]
@@ -48,7 +50,9 @@ def test_create_section_recovers_echoed_id():
 
     async def fake_call(name, args):
         assert name == "create_project_column"
-        assert args == {"project_id": "pid1", "name": "Tg"}
+        assert args == {
+            "project_id": "pid1", "name": "Tg", "automation_key": tt._automation_key,
+        }
         return "Column created\nID: col_tg"
 
     tt.call = fake_call  # type: ignore[assignment]
