@@ -164,9 +164,10 @@ connected in Telegram) `Business connection … for owner …`.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 cp .env.example .env   # fill values
 python -m app.main
+ruff check .           # style — same command CI runs
 pytest                 # pure-logic tests
 ```
 
@@ -176,6 +177,19 @@ pytest                 # pure-logic tests
   (not the deprecated `output_format`). Adaptive thinking + prompt caching on the
   stable system prompt.
 - Work on a feature branch off `main`; PR into `main`.
+- CI (`.github/workflows/ci.yml`) runs `ruff check .` + `pytest` on every push
+  and PR, plus a `docker build` and a shellcheck/YAML pass. Tool versions live
+  in `requirements-dev.txt` (ruff pinned `<0.16` on purpose — see the comment
+  there). Keep `main` green: this repo auto-deploys to Railway on push.
+- **Never anchor a test fixture to a hard-coded calendar date when the code
+  under test derives its own window from the real clock** (`utcnow() -
+  *_lookback_days` in the triage/claims/calendar ticks, `datetime.now() -
+  days_back` in the MCP queues, the `normalize_times` anchor). Such a fixture
+  expires silently N days after it is written — and the failure mode is not
+  only a red test but a test that keeps passing on an empty code path. Build
+  fixtures relative to `datetime.now(timezone.utc)`; see `_recent()` /
+  `_soon_iso()` and their comments in tests/test_triage.py,
+  tests/test_claims.py, tests/test_calendar_events.py.
 
 ## Onboarding / distribution
 
