@@ -162,6 +162,22 @@ class FakeSettings:
     triage_lookback_days = 3
 
 
+# WALL-CLOCK RULE for anything that goes through run_triage_tick (or the MCP
+# queue tools): those derive their own cutoff from the REAL clock
+# (`utcnow() - triage_lookback_days` / `datetime.now(...) - days_back`), so
+# their fixtures must be anchored to the real clock too. A hard-coded calendar
+# base looks fine on the day it is written and then silently expires
+# `lookback` days later: the fixture falls out of the window, the query returns
+# nothing, and the test either fails (run_triage_tick) or — worse — keeps
+# passing vacuously because "nothing happened" satisfies its assertions
+# (test_run_triage_tick_skips_unscored_signals). Both happened here: a
+# 2026-08-03 base went stale on 2026-08-06. Tests that pass `since=` in
+# explicitly (get_pending_triage_signals) may keep a fixed date — they never
+# consult the real clock.
+def _recent(hours_ago: float = 1) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # verdict_for_score
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,9 +355,8 @@ def test_get_pending_triage_signals_empty_when_nothing_pending(monkeypatch):
 
 
 def test_run_triage_tick_writes_triage_field_with_verdicts(monkeypatch):
-    now = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
-    low = _signal_doc("c-low", now - timedelta(hours=1))
-    high = _signal_doc("c-high", now - timedelta(hours=1))
+    low = _signal_doc("c-low", _recent())
+    high = _signal_doc("c-high", _recent())
     db = _use_fake_db(monkeypatch, signal_docs=[low, high])
 
     async def fake_batch(items):
@@ -365,18 +380,40 @@ def test_run_triage_tick_writes_triage_field_with_verdicts(monkeypatch):
 
 
 def test_run_triage_tick_skips_unscored_signals(monkeypatch):
-    now = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
-    doc = _signal_doc("c1", now - timedelta(hours=1))
+    doc = _signal_doc("c1", _recent())
     db = _use_fake_db(monkeypatch, signal_docs=[doc])
+    seen: list[list[dict]] = []
 
     async def failing_batch(items):
+        seen.append(items)
         return []
 
     monkeypatch.setattr(claude, "score_triage_batch", failing_batch)
 
     count = _run(triage.run_triage_tick(FakeSettings()))
 
+    # The signal MUST have reached the scorer — without this the assertions
+    # below are also satisfied by "the tick found nothing at all", which is
+    # exactly how this test passed vacuously once its fixture aged out of the
+    # lookback window (see _recent()'s wall-clock rule above).
+    assert [len(batch) for batch in seen] == [1]
     assert count == 0
+    assert "triage" not in db.signals.docs[0]
+
+
+def test_run_triage_tick_ignores_signals_older_than_the_lookback_window(monkeypatch):
+    """The tick derives its own cutoff from utcnow() - triage_lookback_days;
+    nothing older may be re-scored. Guards the window that
+    get_pending_triage_signals only sees through an explicit `since=`."""
+    doc = _signal_doc("c-old", _recent(hours_ago=24 * FakeSettings.triage_lookback_days + 1))
+    db = _use_fake_db(monkeypatch, signal_docs=[doc])
+
+    async def must_not_run(items):
+        raise AssertionError("a signal older than the lookback window must not be scored")
+
+    monkeypatch.setattr(claude, "score_triage_batch", must_not_run)
+
+    assert _run(triage.run_triage_tick(FakeSettings())) == 0
     assert "triage" not in db.signals.docs[0]
 
 
@@ -473,6 +510,21 @@ def test_get_triage_queue_filters_by_verdict(monkeypatch):
     items = _run(mcpro.get_triage_queue(verdict="decision", days_back=3))
 
     assert [i["source_id"] for i in items] == ["c-decision"]
+
+
+def test_get_triage_queue_excludes_signals_older_than_days_back(monkeypatch):
+    """days_back must actually cut: without this, dropping the `since` filter
+    from get_triage_queue would break no test at all."""
+    now = datetime.now(timezone.utc)
+    triaged = {"score": 0.9, "category": "commitment", "verdict": "decision",
+               "reason": "r", "rubric_version": "v0", "scored_at": now}
+    recent = _signal_doc("c-recent", now - timedelta(hours=1), triage=dict(triaged))
+    stale = _signal_doc("c-stale", now - timedelta(days=4), triage=dict(triaged))
+    _use_fake_db(monkeypatch, signal_docs=[recent, stale])
+
+    items = _run(mcpro.get_triage_queue(days_back=3))
+
+    assert [i["source_id"] for i in items] == ["c-recent"]
 
 
 def test_submit_triage_feedback_ok(monkeypatch):

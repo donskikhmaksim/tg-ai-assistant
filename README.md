@@ -210,9 +210,12 @@ onboarding (`ONBOARDING_*`, `NOTES_BASE_URL`).
 ## Tests
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt
+ruff check .      # style, same command CI runs
 pytest            # pure-logic tests: window construction, deadline formatting
 ```
+
+Both run on every push and pull request — see `.github/workflows/ci.yml`.
 
 ## Deploy
 

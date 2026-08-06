@@ -1,5 +1,6 @@
 """Ported crypto for the per-user vault: encrypt/decrypt, tamper, HMAC, tokens."""
-import base64, os
+import base64
+import os
 os.environ.setdefault("TOKEN_ENC_KEY", base64.b64encode(b"k"*32).decode())
 import pytest
 from app.onboarding import crypto
@@ -15,7 +16,8 @@ def test_versioned_and_random():
 
 def test_tamper_raises():
     ct = crypto.encrypt_secret("secret")
-    raw = bytearray(base64.b64decode(ct[3:])); raw[-1] ^= 1
+    raw = bytearray(base64.b64decode(ct[3:]))
+    raw[-1] ^= 1
     with pytest.raises(Exception):
         crypto.decrypt_secret("v1:" + base64.b64encode(bytes(raw)).decode())
 

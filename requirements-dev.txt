@@ -1,0 +1,16 @@
+# Test/lint toolchain — installed by .github/workflows/ci.yml on top of
+# requirements.txt, and by anyone running `pytest` / `ruff check .` locally.
+# Keep this the ONLY source of those versions so CI and a laptop agree.
+
+pytest>=8,<10
+
+# ЗАПИНЕН НАМЕРЕННО. Без верхней границы CI ставит самую свежую ruff, и её
+# очередной релиз краснит сборку сотнями замечаний к коду, который никто не
+# трогал (на этом репозитории ruff 0.16 даёт 137 против 0 у 0.15 — новые
+# правила стали дефолтными). Линтер не должен ломать сборку из-за СВОЕГО
+# релиза: версия поднимается отдельным осознанным коммитом вместе с починкой
+# замечаний, а не молча в момент, когда кто-то открыл PR.
+ruff>=0.15,<0.16
+
+# Для шага "Workflow files are parseable" в ci.yml — см. комментарий там.
+PyYAML>=6,<7
