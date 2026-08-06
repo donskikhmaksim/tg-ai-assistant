@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
-from .. import repositories as repo
+from .. import log_redaction, repositories as repo
 from ..config import get_settings
 from ..mcp_readonly import register_routes as register_mcp_readonly_routes
 from ..onboarding import ai_help
@@ -912,6 +912,14 @@ async def api_cre_notify(request: web.Request) -> web.Response:
 
 
 def build_app(bot: Any) -> web.Application:
+    # ПЕРЕД тем как поднимать маршруты: заглушить секреты, которые едут в
+    # самом URL (`/mcp/<MCP_READONLY_SECRET>`, `/chat?...&t=<токен>`) — иначе
+    # aiohttp пишет их открытым текстом в каждую строку access-лога, а логи
+    # Railway видит всякий, у кого есть доступ к проекту. См. app/log_redaction.py.
+    # Само значение MCP-секрета фильтру сообщает register_routes() ниже — тот,
+    # кто им владеет; здесь работают позиционные правила (сегмент после /mcp/,
+    # параметр ?t=), которым знать значение не требуется.
+    log_redaction.install()
     app = web.Application()
     app["bot"] = bot
     app.add_routes(

@@ -93,6 +93,21 @@ Live and verified in production (Railway, auto-deploy from `main`):
   v1 is system-prompt-only (condensed onboarding docs baked in) — no codebase
   RAG, by design; a documented deferred enhancement.
 - Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
+- Log redaction (`app/log_redaction.py`): every secret this bot carries IN THE
+  URL is masked before anything is printed. Two of them leak through aiohttp's
+  access log (it prints the full request line, and `Referer`, on every
+  request): the read-only MCP mount `/mcp/<MCP_READONLY_SECRET>` and the
+  transcript link's `?t=<chat_link_token>`. Two more leak through EXCEPTION
+  TEXT, since http clients put the full URL in the error message and
+  `logger.exception()` prints it: `TICKTICK_MCP_URL` (secret in its path too —
+  audit poller, watchdog, `/connect`, Mini App) and `BOT_TOKEN` (voice
+  downloads go to `api.telegram.org/file/bot<TOKEN>/…`). The filter is
+  installed by `build_app()` (positional rules need no secret value) and told
+  the actual MCP secret by `mcp_readonly.register_routes()`; it masks the
+  *value* only, keeping client address / method / path / status / size /
+  exception type / traceback intact. `tests/test_log_redaction.py` asserts all
+  of that against a real server and a real log stream (Railway logs are
+  readable by anyone with project access, so this is not cosmetic).
 
 Known loose ends:
 - Qwen/embeddings depend on an external Ollama endpoint (`QWEN_BASE_URL`); when
