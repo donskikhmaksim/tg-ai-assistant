@@ -22,7 +22,6 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 

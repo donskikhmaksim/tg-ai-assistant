@@ -407,7 +407,7 @@ async def delete_project_binding(chat_id: str) -> bool:
 
 async def list_project_bindings() -> list[dict[str, Any]]:
     db = get_db()
-    return [d async for d in get_db().chat_project_map.find({})]
+    return [d async for d in db.chat_project_map.find({})]
 
 
 # ---------------------------------------------------------------------------

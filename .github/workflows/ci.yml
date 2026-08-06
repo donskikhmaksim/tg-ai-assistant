@@ -1,0 +1,81 @@
+name: CI
+
+# Каждый push и каждый pull request. До 2026-08-06 у репозитория не было НИ
+# ОДНОЙ автоматической проверки: любой push в main уезжал на Railway, не
+# пройдя ни одного теста — и четыре красных теста прожили в main незамеченными,
+# потому что смотреть было некому. Это сервис, который читает личные переписки
+# владельца и пишет задачи от его имени, так что дешёвая проверка перед
+# выкаткой стоит своих трёх минут.
+#
+# Внешних сервисов у прогона НЕТ и быть не должно: все тесты в tests/ — чистая
+# логика с подменой Mongo/Anthropic/Ollama на границе (см. шапки
+# tests/test_claims.py и tests/test_triage.py). Если когда-нибудь появится
+# тест, которому нужен настоящий Mongo, поднимать его надо `services:`-блоком,
+# как это сделано в ticktick-mcp, а не самодельным двойником.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # Никаких секретов в окружении: приложение читает настройки лениво,
+        # и прогон обязан оставаться зелёным на голой машине без .env.
+        run: pytest
+
+  build:
+    # Ловит то, чего не видят тесты: Railway собирает прод-образ ровно по этому
+    # Dockerfile, а деплойщики ставят бота скриптом scripts/setup.sh. Сломать
+    # их можно, не тронув ни строчки Python.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the production image
+        run: docker build .
+
+      - name: Shellcheck the installer
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
+
+      - name: Workflow files are parseable
+        # Не формальность: .github/workflows/sync-upstream.yml пролежал битым
+        # (перенос строки обратным слэшем разрывал блок `run: |`) с 2026-07-09
+        # по 2026-08-06 — GitHub молча ронял КАЖДЫЙ запуск с "workflow file
+        # issue", и авто-обновление форков у самостоятельных деплойщиков не
+        # работало ни разу. Один разбор YAML это ловит сразу.
+        run: |
+          python -m pip install --quiet 'PyYAML>=6,<7'
+          python - <<'PY'
+          import pathlib, sys, yaml
+          bad = []
+          for p in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              try:
+                  yaml.safe_load(p.read_text())
+              except yaml.YAMLError as e:
+                  bad.append(f"{p}: {e}")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("all workflow files parse")
+          PY

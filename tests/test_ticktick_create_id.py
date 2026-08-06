@@ -1,7 +1,7 @@
 """The root fix: create_tasks now echoes the new id inline as `(id:<id>)`, and
 the client reads it straight from the result line (no title search). These lock
 the parse against the exact strings the ticktick-mcp server emits."""
-from app.ticktick.mcp_client import _PAREN_ID_RE
+from app.ticktick.mcp_client import _PAREN_ID_RE, _SEARCH_TITLE_RE
 
 
 def _id(text: str) -> str | None:
@@ -33,7 +33,6 @@ def test_created_id_absent_returns_none():
 
 
 # ── find_task_id title extraction vs search_tasks meta block ──────────────
-from app.ticktick.mcp_client import _SEARCH_TITLE_RE
 
 
 def _title(line: str) -> str | None:
