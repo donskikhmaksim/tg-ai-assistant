@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -168,6 +169,31 @@ class FakeSettings:
     calendar_mcp_url = ""
     calendar_target_calendar_id = ""
     calendar_mcp_account = ""
+
+
+# WALL-CLOCK RULE — the same one tests/test_triage.py and tests/test_claims.py
+# document at their own _recent(). run_calendar_events_tick reads the REAL
+# clock TWICE: once for its lookback window (`utcnow() -
+# calendar_events_lookback_days`) and once as the anchor normalize_times
+# judges an event's start against (`calendar_event_max_past_days` /
+# `_max_future_days`). A fixture pinned to a calendar date therefore rots on
+# BOTH counts a few days after it is written — the signal drops out of the
+# window and the event start slides into the "too far in the past" band. Tests
+# that pass `since=`/`anchor` in explicitly (get_extractable_signals,
+# normalize_times) or that feed create_pending_events a ready-made document
+# never consult the real clock and may keep fixed dates.
+def _recent(hours_ago: float = 1) -> datetime:
+    """A signal ts_start that is always inside the lookback window."""
+    return datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+
+
+def _soon_iso(hours_ahead: float = 6) -> str:
+    """An event start that is always in the near future relative to the tick's
+    own anchor, in FakeSettings.default_timezone. Seconds are zeroed because
+    event_key() keys on minute precision — callers that need the SAME key
+    across two ticks must reuse one returned value, not call this twice."""
+    local = datetime.now(ZoneInfo(FakeSettings.default_timezone)) + timedelta(hours=hours_ahead)
+    return local.replace(second=0, microsecond=0).isoformat()
 
 
 async def _fake_record_mutation(**kwargs):
@@ -344,16 +370,16 @@ def test_get_extractable_signals_filters_verdict_extracted_and_window(monkeypatc
 
 
 def test_run_tick_writes_pending_event_and_marks_signal(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    start = _soon_iso()
 
     async def fake_extract(items, tz_name):
         return [{
             "index": 0,
             "events": [{
                 "activity_type": "call", "counterparty": "клиент",
-                "start": "2026-08-04T18:00:00-07:00", "end": None, "all_day": False,
+                "start": start, "end": None, "all_day": False,
                 "evidence_quote": None, "confidence": 0.9, "needs_clarification": False,
             }],
         }]
@@ -373,8 +399,7 @@ def test_run_tick_writes_pending_event_and_marks_signal(monkeypatch):
 
 
 def test_run_tick_marks_signal_even_with_zero_events(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
 
     async def fake_extract(items, tz_name):
@@ -392,33 +417,39 @@ def test_run_tick_marks_signal_even_with_zero_events(monkeypatch):
 
 
 def test_run_tick_llm_failure_leaves_signal_unmarked(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    seen: list[list] = []
 
     async def failing_extract(items, tz_name):
+        seen.append(items)
         return []  # whole batch call failed, same contract as score_triage_batch
 
     monkeypatch.setattr(claude, "extract_calendar_events_batch", failing_extract)
 
     result = _run(calendar_events.run_calendar_events_tick(FakeSettings()))
 
+    # The signal MUST have reached the extractor — otherwise every assertion
+    # below is also satisfied by "the tick found nothing at all", which is
+    # what this test silently degraded into once its fixture aged out of the
+    # lookback window (see _recent()'s wall-clock rule above).
+    assert [len(items) for items in seen] == [1]
     assert result == (0, 0)
     assert db.calendar_events.docs == []
     assert "calendar_extracted" not in db.signals.docs[0]
 
 
 def test_run_tick_low_confidence_event_is_skipped(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    start = _soon_iso()
 
     async def fake_extract(items, tz_name):
         return [{
             "index": 0,
             "events": [{
                 "activity_type": "call", "counterparty": "клиент",
-                "start": "2026-08-04T18:00:00-07:00", "end": None, "all_day": False,
+                "start": start, "end": None, "all_day": False,
                 "evidence_quote": None, "confidence": 0.2, "needs_clarification": False,
             }],
         }]
@@ -436,16 +467,16 @@ def test_run_tick_low_confidence_event_is_skipped(monkeypatch):
 
 
 def test_run_tick_flag_disabled_never_touches_calendar_client(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    start = _soon_iso()
 
     async def fake_extract(items, tz_name):
         return [{
             "index": 0,
             "events": [{
                 "activity_type": "meeting", "counterparty": None,
-                "start": "2026-08-04T18:00:00-07:00", "end": None, "all_day": False,
+                "start": start, "end": None, "all_day": False,
                 "evidence_quote": None, "confidence": 0.9, "needs_clarification": False,
             }],
         }]
@@ -470,16 +501,16 @@ def test_run_tick_flag_disabled_never_touches_calendar_client(monkeypatch):
 
 
 def test_run_tick_missing_calendar_id_leaves_pending(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    start = _soon_iso()
 
     async def fake_extract(items, tz_name):
         return [{
             "index": 0,
             "events": [{
                 "activity_type": "meeting", "counterparty": None,
-                "start": "2026-08-04T18:00:00-07:00", "end": None, "all_day": False,
+                "start": start, "end": None, "all_day": False,
                 "evidence_quote": None, "confidence": 0.9, "needs_clarification": False,
             }],
         }]
@@ -549,16 +580,19 @@ def test_create_event_args_never_include_attendees_and_always_send_updates_none(
 
 
 def test_idempotent_rerun_of_same_signal_creates_the_event_exactly_once(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
+    sig = _signal_doc("user_1:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig])
+    # ONE start value reused by both ticks — event_key() is derived from it,
+    # and the whole point of this test is that the second tick lands on the
+    # SAME key.
+    start = _soon_iso()
 
     async def fake_extract(items, tz_name):
         return [{
             "index": 0,
             "events": [{
                 "activity_type": "call", "counterparty": "клиент",
-                "start": "2026-08-04T18:00:00-07:00", "end": None, "all_day": False,
+                "start": start, "end": None, "all_day": False,
                 "evidence_quote": None, "confidence": 0.9, "needs_clarification": False,
             }],
         }]
@@ -602,14 +636,13 @@ def test_idempotent_rerun_of_same_signal_creates_the_event_exactly_once(monkeypa
 
 
 def test_dedup_across_chats_same_meeting_collapses_to_one_event(monkeypatch):
-    now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    sig_a = _signal_doc("user_1:2026-08-04", now - timedelta(hours=1))
-    sig_b = _signal_doc("user_2:2026-08-04", now - timedelta(hours=1))
+    sig_a = _signal_doc("user_1:2026-08-04", _recent())
+    sig_b = _signal_doc("user_2:2026-08-04", _recent())
     db = _use_fake_db(monkeypatch, signals_docs=[sig_a, sig_b])
 
     same_event = {
         "activity_type": "meeting", "counterparty": "Иван Петров",
-        "start": "2026-08-05T10:00:00-07:00", "end": None, "all_day": False,
+        "start": _soon_iso(hours_ahead=24), "end": None, "all_day": False,
         "evidence_quote": None, "confidence": 0.9, "needs_clarification": False,
     }
 

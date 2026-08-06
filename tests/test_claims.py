@@ -166,6 +166,21 @@ async def _no_ticktick():
     return None
 
 
+# WALL-CLOCK RULE — same one tests/test_triage.py documents at _recent():
+# run_claims_tick and the MCP queue tools compute their own cutoff from the
+# REAL clock (`utcnow() - claims_lookback_days`, `datetime.now(...) -
+# days_back`), so their fixtures must be anchored to the real clock as well.
+# A hard-coded calendar base expires `lookback` days after it is written: the
+# fixture drops out of the window and the test either fails outright
+# (run_claims_tick, get_claims_queue) or keeps passing on an empty code path
+# (test_run_claims_tick_leaves_signal_unclaimed_when_generation_fails). Both
+# happened here — a 2026-08-03 base went stale on 2026-08-06. Tests that pass
+# `since=` in explicitly (get_claimable_signals) or that never touch the clock
+# at all (claim_dedup windows, _build_claim_doc) may keep a fixed date.
+def _recent(hours_ago: float = 1) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+
+
 # ── claim_dedup.group_signals ───────────────────────────────────────────
 # Uses a SYNTHETIC "email" source (this repo doesn't ingest one today) purely
 # to exercise the cross-source algorithm — see module docstring.
@@ -465,8 +480,7 @@ def test_build_claim_doc_verdict_decision_wins_over_auto_in_a_group():
 
 
 def test_run_claims_tick_writes_claim_and_marks_signals_claimed(monkeypatch):
-    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("c1", now - timedelta(hours=1), verdict="decision")
+    sig = _signal_doc("c1", _recent(), verdict="decision")
     db = _use_fake_db(monkeypatch, signal_docs=[sig])
 
     async def fake_group(docs, settings):
@@ -504,14 +518,15 @@ def test_run_claims_tick_writes_claim_and_marks_signals_claimed(monkeypatch):
 
 
 def test_run_claims_tick_leaves_signal_unclaimed_when_generation_fails(monkeypatch):
-    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-    sig = _signal_doc("c1", now - timedelta(hours=1), verdict="auto")
+    sig = _signal_doc("c1", _recent(), verdict="auto")
     db = _use_fake_db(monkeypatch, signal_docs=[sig])
+    seen: list[list] = []
 
     async def fake_group(docs, settings):
         return [docs]
 
     async def failing_generate(groups, project_names):
+        seen.append(groups)
         return []  # whole batch call failed, same contract as score_triage_batch
 
     monkeypatch.setattr(claims.claim_dedup, "group_signals", fake_group)
@@ -520,7 +535,34 @@ def test_run_claims_tick_leaves_signal_unclaimed_when_generation_fails(monkeypat
 
     count = _run(claims.run_claims_tick(FakeClaimsSettings()))
 
+    # The group MUST have reached card generation — otherwise "no claim was
+    # written" is also true when the tick simply found no claimable signal,
+    # which is how this test passed vacuously once its fixture aged out of
+    # the lookback window (see _recent()'s wall-clock rule above).
+    assert [len(groups) for groups in seen] == [1]
     assert count == 0
+    assert db.claims.docs == []
+    assert "claimed" not in db.signals.docs[0]
+
+
+def test_run_claims_tick_ignores_signals_older_than_the_lookback_window(monkeypatch):
+    """The tick derives its own cutoff from utcnow() - claims_lookback_days;
+    nothing older may be claimed. Guards the window that
+    get_claimable_signals only ever sees through an explicit `since=`."""
+    sig = _signal_doc(
+        "c-old", _recent(hours_ago=24 * FakeClaimsSettings.claims_lookback_days + 1),
+        verdict="decision",
+    )
+    db = _use_fake_db(monkeypatch, signal_docs=[sig])
+
+    async def must_not_run(*a, **kw):
+        raise AssertionError("a signal older than the lookback window must not be claimed")
+
+    monkeypatch.setattr(claims.claim_dedup, "group_signals", must_not_run)
+    monkeypatch.setattr(claude, "generate_claims_batch", must_not_run)
+    monkeypatch.setattr(claims, "resolve_ticktick", _no_ticktick)
+
+    assert _run(claims.run_claims_tick(FakeClaimsSettings())) == 0
     assert db.claims.docs == []
     assert "claimed" not in db.signals.docs[0]
 
@@ -543,22 +585,20 @@ def test_run_claims_tick_no_pending_signals_returns_zero(monkeypatch):
 # tests/test_triage.py's get_triage_queue/submit_triage_feedback tests ────
 
 
+def _claim_doc(claim_id: str, verdict: str, created_at: datetime, title: str) -> dict:
+    return {
+        "claim_id": claim_id, "signal_ids": ["telegram:c1"], "title": title,
+        "subtasks": [], "description": "d", "due_date": None,
+        "needs_due_clarification": False, "project": "unsorted",
+        "with_whom": None, "needs_clarification": False,
+        "verdict": verdict, "created_at": created_at,
+    }
+
+
 def test_get_claims_queue_returns_only_matching_verdict(monkeypatch):
-    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-    decision_claim = {
-        "claim_id": "claim-1", "signal_ids": ["telegram:c1"], "title": "Decide something",
-        "subtasks": [], "description": "d", "due_date": None,
-        "needs_due_clarification": False, "project": "unsorted",
-        "with_whom": None, "needs_clarification": False,
-        "verdict": "decision", "created_at": now,
-    }
-    auto_claim = {
-        "claim_id": "claim-2", "signal_ids": ["telegram:t1"], "title": "Do something",
-        "subtasks": [], "description": "d", "due_date": None,
-        "needs_due_clarification": False, "project": "unsorted",
-        "with_whom": None, "needs_clarification": False,
-        "verdict": "auto", "created_at": now,
-    }
+    now = _recent()
+    decision_claim = _claim_doc("claim-1", "decision", now, "Decide something")
+    auto_claim = _claim_doc("claim-2", "auto", now, "Do something")
     _use_fake_db(monkeypatch, claims_docs=[decision_claim, auto_claim])
 
     items = _run(mcpro.get_claims_queue(verdict="decision", days_back=3))
@@ -568,23 +608,23 @@ def test_get_claims_queue_returns_only_matching_verdict(monkeypatch):
 
 
 def test_get_claims_queue_returns_both_verdicts_when_unfiltered(monkeypatch):
-    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-    decision_claim = {
-        "claim_id": "claim-1", "signal_ids": ["telegram:c1"], "title": "A",
-        "subtasks": [], "description": "d", "due_date": None,
-        "needs_due_clarification": False, "project": "unsorted",
-        "with_whom": None, "needs_clarification": False,
-        "verdict": "decision", "created_at": now,
-    }
-    auto_claim = {
-        "claim_id": "claim-2", "signal_ids": ["telegram:t1"], "title": "B",
-        "subtasks": [], "description": "d", "due_date": None,
-        "needs_due_clarification": False, "project": "unsorted",
-        "with_whom": None, "needs_clarification": False,
-        "verdict": "auto", "created_at": now,
-    }
+    now = _recent()
+    decision_claim = _claim_doc("claim-1", "decision", now, "A")
+    auto_claim = _claim_doc("claim-2", "auto", now, "B")
     _use_fake_db(monkeypatch, claims_docs=[decision_claim, auto_claim])
 
     items = _run(mcpro.get_claims_queue(days_back=3))
 
     assert {i["claim_id"] for i in items} == {"claim-1", "claim-2"}
+
+
+def test_get_claims_queue_excludes_claims_older_than_days_back(monkeypatch):
+    """days_back must actually cut: without this, dropping the `since` filter
+    from get_claims_queue would break no test at all."""
+    recent = _claim_doc("claim-recent", "decision", _recent(), "Recent")
+    stale = _claim_doc("claim-stale", "decision", _recent(hours_ago=24 * 4), "Stale")
+    _use_fake_db(monkeypatch, claims_docs=[recent, stale])
+
+    items = _run(mcpro.get_claims_queue(days_back=3))
+
+    assert [i["claim_id"] for i in items] == ["claim-recent"]
