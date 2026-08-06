@@ -354,6 +354,85 @@ def test_server_tells_the_filter_the_actual_secret_value(monkeypatch):
     assert "/probe?key=<mcp-secret>" in printed
 
 
+def test_secret_arriving_as_a_log_argument_is_redacted(monkeypatch):
+    """Так пишет watchdog: `logger.error("Watchdog: %s", detail)`, где detail
+    собран из текста ошибки и несёт полный адрес с секретом. Секрет здесь —
+    в аргументе, а не в шаблоне; подстановка обязана остаться рабочей."""
+    foreign_secret = "someone0elses0mcp0secret0777"
+    cap = _LogCapture()
+    try:
+        _build_app(monkeypatch)
+        logging.getLogger("app.pipeline.watchdog").error(
+            "Watchdog: %s", f"ticktick: 404 for https://tt.up.railway.app/mcp/{foreign_secret}"
+        )
+    finally:
+        cap.close()
+
+    printed = cap.text
+    assert foreign_secret not in printed
+    assert "Watchdog: ticktick: 404 for https://tt.up.railway.app/mcp/<mcp-secret>" in printed
+
+
+def test_exception_text_with_ticktick_mcp_url_is_redacted(monkeypatch):
+    """Главный канал утечки СОСЕДНЕГО секрета: `logger.exception(...)`.
+
+    У `TICKTICK_MCP_URL` секрет тоже лежит в пути, а httpx кладёт ПОЛНЫЙ
+    адрес в текст ошибки — и `logger.exception()` печатает его вместе с
+    трейсбеком (audit-поллер каждые 5 минут, watchdog, /connect, Mini App).
+    Фильтру это значение неизвестно, спасает только позиционное правило.
+    """
+    foreign_secret = "someone0elses0mcp0secret0999"
+    cap = _LogCapture(fmt="%(levelname)s %(message)s")
+    try:
+        _build_app(monkeypatch)
+        try:
+            raise RuntimeError(
+                "Client error '404 Not Found' for url "
+                f"'https://ticktick-mcp.up.railway.app/mcp/{foreign_secret}'"
+            )
+        except RuntimeError:
+            logging.getLogger("app.audit.poller").exception("ticktick audit poll failed")
+    finally:
+        cap.close()
+
+    printed = cap.text
+    assert foreign_secret not in printed
+    assert "/mcp/<mcp-secret>" in printed
+    # Диагностика на месте: и своё сообщение, и тип ошибки, и трейсбек.
+    assert "ticktick audit poll failed" in printed
+    assert "RuntimeError" in printed
+    assert "404 Not Found" in printed
+    assert "Traceback (most recent call last)" in printed
+
+
+def test_exception_text_with_telegram_file_url_hides_the_bot_token(monkeypatch):
+    """Второй такой же канал: скачивание голосового идёт по
+    `https://api.telegram.org/file/bot<BOT_TOKEN>/…`, а aiohttp кладёт полный
+    URL в текст ClientResponseError — и handlers_messages ловит это через
+    `logger.exception("Failed to download media…")`.
+    """
+    cap = _LogCapture()
+    try:
+        _build_app(monkeypatch)
+        try:
+            raise RuntimeError(
+                "404, message='Not Found', url='https://api.telegram.org/file/"
+                f"bot{FAKE_BOT_TOKEN}/voice/file_42.oga'"
+            )
+        except RuntimeError:
+            logging.getLogger("app.telegram.handlers_messages").exception(
+                "Failed to download media for transcription"
+            )
+    finally:
+        cap.close()
+
+    printed = cap.text
+    assert FAKE_BOT_TOKEN not in printed
+    assert "bot<bot-token>" in printed
+    assert "voice/file_42.oga" in printed
+    assert "Failed to download media for transcription" in printed
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Юнит-уровень: сама функция redact()
 # ─────────────────────────────────────────────────────────────────────────────

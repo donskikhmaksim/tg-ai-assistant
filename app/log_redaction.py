@@ -12,6 +12,20 @@
    есть пропуск: по нему читается вся история конкретного чата без
    Telegram-авторизации.
 
+И ещё два секрета того же вида утекают НЕ через access-лог, а через ТЕКСТ
+ИСКЛЮЧЕНИЯ (`logger.exception` печатает `str(exc)` и трейсбек, а http-клиенты
+кладут в текст ошибки полный адрес запроса):
+
+3. `TICKTICK_MCP_URL` — у чужого MCP-сервера секрет тоже лежит в пути, а
+   httpx формирует «Client error '404 …' for url 'https://…/mcp/<секрет>'».
+   Срабатывает на обычных сбоях: audit-поллер (каждые ~5 мин),
+   watchdog, `/connect` с опечаткой, любой TickTick-вызов Mini App.
+4. `BOT_TOKEN` — голосовые качаются по
+   `https://api.telegram.org/file/bot<BOT_TOKEN>/…`, и aiohttp кладёт этот
+   URL в текст ClientResponseError, который ловит
+   handlers_messages.py → `logger.exception("Failed to download media…")`.
+   Это самый мощный секрет системы: полный контроль над ботом.
+
 aiohttp по умолчанию логирует каждый запрос строкой формата
 `%a %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"` через логгер
 `aiohttp.access` (aiohttp/web_log.py::AccessLogger.log), то есть путь с
@@ -73,7 +87,11 @@ _MIN_INLINE_SECRET_LEN = 8
 # неизвестно (например ссылку выдал другой процесс) и независимо от длины.
 #
 # 1. сегмент пути сразу после /mcp — это и есть пропуск к MCP-серверу.
-_MCP_PATH_RE = re.compile(r"(?<![\w/])(/mcp/)([^/?\s\"']+)")
+#    Без lookbehind намеренно: секрет светится не только в access-логе
+#    («POST /mcp/…»), но и внутри ПОЛНОГО адреса в тексте исключения
+#    (httpx: "Client error '404' for url 'https://host/mcp/<секрет>'" —
+#    так утекает TICKTICK_MCP_URL, у которого секрет тоже лежит в пути).
+_MCP_PATH_RE = re.compile(r"(/mcp/)([^/?\s\"'<>]+)")
 # 2. query-параметр `t=` — подписанный токен ссылки на транскрипт. Требуем
 #    перед ним `?` или `&`, чтобы не трогать осмысленный текст, где «t=»
 #    может встретиться сам по себе.
@@ -140,18 +158,59 @@ class SecretPathFilter(logging.Filter):
         self.secret = secret or None
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg, self.secret)
         args = record.args
         if isinstance(args, dict):
             record.args = {k: _redact_any(v, self.secret) for k, v in args.items()}
         elif isinstance(args, tuple):
             record.args = tuple(_redact_any(a, self.secret) for a in args)
+        if isinstance(record.msg, str):
+            masked = redact(record.msg, self.secret)
+            if masked != record.msg:
+                # Осторожно: сообщение может быть ШАБЛОНОМ («… /mcp/%s»), и
+                # маскировка способна съесть сам плейсхолдер — тогда logging
+                # упадёт на подстановке аргументов и строка пропадёт совсем.
+                # Если правка задела шаблон, разворачиваем его в готовый текст
+                # и маскируем уже результат.
+                if record.args:
+                    try:
+                        record.msg = redact(record.getMessage(), self.secret)
+                        record.args = ()
+                    except Exception:  # noqa: BLE001 — логирование не должно падать
+                        record.msg = masked
+                else:
+                    record.msg = masked
         for key in _AIOHTTP_EXTRA_KEYS:
             value = record.__dict__.get(key)
             if value is not None:
                 record.__dict__[key] = _redact_any(value, self.secret)
+        self._redact_traceback(record)
         return True
+
+    def _redact_traceback(self, record: logging.LogRecord) -> None:
+        """Замаскировать текст исключения и стек.
+
+        Это НЕ теоретический случай, а главный канал утечки для соседних
+        секретов: `logger.exception(...)` печатает не только своё сообщение,
+        но и `str(exc)` с трейсбеком, а httpx/aiohttp кладут в текст ошибки
+        ПОЛНЫЙ адрес запроса. Так в лог попадают
+        `TICKTICK_MCP_URL` (у него секрет тоже в пути — audit-поллер,
+        watchdog, /connect, Mini App) и BOT_TOKEN
+        (`https://api.telegram.org/file/bot<TOKEN>/…` при сбое скачивания
+        голосового).
+
+        Приём: logging.Formatter берёт готовый `record.exc_text`, если он
+        уже проставлен, и только иначе строит его из `exc_info`. Значит
+        достаточно построить текст самим, замаскировать и положить обратно.
+        """
+        if record.exc_info and not record.exc_text:
+            try:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            except Exception:  # noqa: BLE001 — логирование не должно падать
+                return
+        if record.exc_text:
+            record.exc_text = redact(record.exc_text, self.secret)
+        if getattr(record, "stack_info", None):
+            record.stack_info = redact(record.stack_info, self.secret)
 
 
 #: Логгеры, на которые фильтр вешается напрямую: их записи и содержат путь.
