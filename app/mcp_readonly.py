@@ -82,7 +82,7 @@ from aiohttp import web
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-from . import repositories as repo
+from . import log_redaction, repositories as repo
 from .config import get_settings
 from .db import get_db
 
@@ -729,6 +729,11 @@ def register_routes(app: web.Application) -> None:
     if not secret:
         logger.info("MCP_READONLY_SECRET is not set — read-only MCP server is OFF.")
         return
+
+    # Секрет живёт в ПУТИ, а путь aiohttp печатает в каждой строке access-лога.
+    # Сообщаем его фильтру логов здесь — это единственное место, которое им
+    # владеет (сам фильтр ставится в web/server.py::build_app).
+    log_redaction.install(secret)
 
     session_manager = StreamableHTTPSessionManager(
         app=mcp._mcp_server,  # noqa: SLF001 — the low-level Server; FastMCP itself only exposes it via a Starlette app we don't need

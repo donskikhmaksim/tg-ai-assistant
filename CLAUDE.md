@@ -93,6 +93,16 @@ Live and verified in production (Railway, auto-deploy from `main`):
   v1 is system-prompt-only (condensed onboarding docs baked in) — no codebase
   RAG, by design; a documented deferred enhancement.
 - Tier-2 can run via the `claude -p` shim (`CLAUDE_CLI_*`) instead of the API.
+- Log redaction (`app/log_redaction.py`): the two secrets this bot carries IN
+  THE URL — the read-only MCP mount `/mcp/<MCP_READONLY_SECRET>` and the
+  transcript link's `?t=<chat_link_token>` — are masked before anything is
+  printed, because aiohttp's access log prints the full path on every request
+  and Railway logs are readable by anyone with project access. The filter is
+  installed by `build_app()` (positional rules, no secret needed) and told the
+  actual MCP secret by `mcp_readonly.register_routes()`. It masks the *value*
+  only, keeping client address / method / path / status / size intact;
+  `tests/test_log_redaction.py` asserts that on a real server + a real log
+  stream.
 
 Known loose ends:
 - Qwen/embeddings depend on an external Ollama endpoint (`QWEN_BASE_URL`); when
